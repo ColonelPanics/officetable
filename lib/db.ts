@@ -496,4 +496,264 @@ const updateAchievementIcons = db.prepare(`
 `);
 updateAchievementIcons.run();
 
+// ============================================================
+// Gambling (office virtual money — see the flowchart + written spec)
+//
+// Challenges hold the negotiable terms (fee / time / side). Counters
+// update the row and append an offer to challenge_terms; accept freezes
+// the terms into a gamble_match with an odds snapshot. All money flows
+// through the bank tables — every movement writes one signed bank_transactions
+// row, so SUM(amount) per account always equals the balance.
+// ============================================================
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS challenges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_id INTEGER NOT NULL REFERENCES games(id),
+    challenger_id INTEGER NOT NULL REFERENCES players(id),
+    opponent_id INTEGER REFERENCES players(id),   -- NULL on broadcast challenges
+    entry_fee INTEGER NOT NULL,
+    scheduled_at TEXT NOT NULL,
+    red_player_id INTEGER,                        -- NULL while a broadcast challenger takes blue
+    challenger_side TEXT NOT NULL DEFAULT 'red',
+    status TEXT NOT NULL DEFAULT 'pending',
+    terms_by INTEGER NOT NULL,
+    broadcast INTEGER NOT NULL DEFAULT 0,
+    payout_line TEXT NOT NULL DEFAULT 'true_even',
+    special_rules TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS challenge_terms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    challenge_id INTEGER NOT NULL REFERENCES challenges(id),
+    entry_fee INTEGER NOT NULL,
+    scheduled_at TEXT NOT NULL,
+    red_player_id INTEGER,
+    proposed_by INTEGER NOT NULL,
+    payout_line TEXT NOT NULL DEFAULT 'true_even',
+    special_rules TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS gamble_matches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    challenge_id INTEGER NOT NULL REFERENCES challenges(id),
+    game_id INTEGER NOT NULL REFERENCES games(id),
+    red_player_id INTEGER NOT NULL REFERENCES players(id),
+    blue_player_id INTEGER NOT NULL REFERENCES players(id),
+    scheduled_at TEXT NOT NULL,
+    bet_close_at TEXT NOT NULL,
+    entry_fee INTEGER NOT NULL,
+    outcome_total INTEGER NOT NULL,
+    odds_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    payout_line TEXT NOT NULL DEFAULT 'true_even',
+    special_rules TEXT,
+    match_id INTEGER,
+    settled_at TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS bets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    gamble_match_id INTEGER NOT NULL REFERENCES gamble_matches(id),
+    bettor_id INTEGER NOT NULL REFERENCES players(id),
+    red_score INTEGER NOT NULL,
+    blue_score INTEGER NOT NULL,
+    stake INTEGER NOT NULL,
+    decimal_odds REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    payout INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS bank_accounts (
+    player_id INTEGER PRIMARY KEY REFERENCES players(id),
+    balance INTEGER NOT NULL DEFAULT 1000,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS bank_house (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    balance INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS bank_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ref_type TEXT NOT NULL,
+    ref_id INTEGER,
+    player_id INTEGER,
+    amount INTEGER NOT NULL,
+    memo TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_gamble_matches_status ON gamble_matches(status);
+  CREATE INDEX IF NOT EXISTS idx_gamble_matches_game_sched ON gamble_matches(game_id, scheduled_at);
+  CREATE INDEX IF NOT EXISTS idx_gamble_matches_players ON gamble_matches(red_player_id, blue_player_id);
+  CREATE INDEX IF NOT EXISTS idx_bets_match ON bets(gamble_match_id);
+  CREATE INDEX IF NOT EXISTS idx_bets_bettor ON bets(bettor_id);
+  CREATE INDEX IF NOT EXISTS idx_bank_transactions_player ON bank_transactions(player_id);
+`);
+
+db.prepare(`INSERT OR IGNORE INTO bank_house (id, balance) VALUES (1, 0)`).run();
+
+// Migration: Alces Bookie central-bank linking. Balances now REALLY live on
+// the shared office bank (http://10.151.0.132:3000 — "bank is the truth"), so
+// bankAccounts gain the player's own registered credentials (registration is
+// manual — the site has no mint of its own), and bank_sync is the outbox of
+// ledger rows still waiting to be pushed out as real transfers.
+try {
+  db.exec(`ALTER TABLE bank_accounts ADD COLUMN bank_username TEXT`);
+} catch (e) { /* column already exists */ }
+try {
+  db.exec(`ALTER TABLE bank_accounts ADD COLUMN bank_password TEXT`);
+} catch (e) { /* column already exists */ }
+try {
+  db.exec(`ALTER TABLE bank_accounts ADD COLUMN bank_linked_at TEXT`);
+} catch (e) { /* column already exists */ }
+// Enforced as an index, not an inline UNIQUE — SQLite cannot ALTER in a
+// UNIQUE column once rows exist (that failure previously disappeared into
+// the catches above), leaving accounts without the linking column at all.
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_accounts_username ON bank_accounts(bank_username)`);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS bank_sync (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaction_id INTEGER NOT NULL REFERENCES bank_transactions(id),
+    status TEXT NOT NULL DEFAULT 'pending',    -- pending | sending | done | failed | unverified
+    attempts INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_bank_sync_status ON bank_sync(status, id);
+`);
+
+// Migration: delivery-verification for retried bank transfers. The bank has
+// no idempotency keys, so a retry after a lost response would double-send.
+// The drainer records the sender's real bank-side balance immediately before
+// each attempt; any later uncertain retry compares the fresh balance against
+// that snapshot (pre_balance) before deciding to re-send. Rows keep their
+// snapshot after completing so even a manual re-arm of a 'done' row verifies
+// instead of blind-resending.
+try {
+  db.exec(`ALTER TABLE bank_sync ADD COLUMN pre_balance REAL`);
+} catch (e) { /* column already exists */ }
+
+// One-time secret migration: anything stored as plaintext (pre-encryption
+// bank passwords, house password, service token) is re-encrypted at rest.
+// Harmless when already encrypted. ESM import keeps db.ts free of crypto
+// imports while running the migration once this module is loaded.
+import('./crypto').then(({ migratePlaintextSecrets }) => migratePlaintextSecrets());
+
+// Migration: challenges gain a link to the gamble match opened on accept
+// (added after the table shipped, so existing DBs need the ALTER).
+try {
+  db.exec(`ALTER TABLE challenges ADD COLUMN gamble_match_id INTEGER REFERENCES gamble_matches(id)`);
+} catch (e) {
+  // Column already exists, ignore
+}
+
+// Migration: broadcast challenges make the opponent optional and the
+// challenger's red/blue pick explicit, and the payout line + special rules
+// join the negotiable terms. Old challenges tables (opponent_id NOT NULL)
+// need a table rebuild — SQLite cannot relax a NOT NULL by ALTER.
+try {
+  const cols = db.prepare(`PRAGMA table_info(challenges)`).all() as { name: string; notnull: number }[];
+  if (cols.find(c => c.name === 'opponent_id')?.notnull) {
+    db.pragma('foreign_keys = OFF'); // children (gamble_matches) keep their live references across the rebuild
+    try {
+      db.exec(`
+        CREATE TABLE challenges_v2 (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          game_id INTEGER NOT NULL REFERENCES games(id),
+          challenger_id INTEGER NOT NULL REFERENCES players(id),
+          opponent_id INTEGER REFERENCES players(id),
+          entry_fee INTEGER NOT NULL,
+          scheduled_at TEXT NOT NULL,
+          red_player_id INTEGER,
+          challenger_side TEXT NOT NULL DEFAULT 'red',
+          status TEXT NOT NULL DEFAULT 'pending',
+          terms_by INTEGER NOT NULL,
+          broadcast INTEGER NOT NULL DEFAULT 0,
+          payout_line TEXT NOT NULL DEFAULT 'true_even',
+          special_rules TEXT,
+          gamble_match_id INTEGER REFERENCES gamble_matches(id),
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO challenges_v2 (id, game_id, challenger_id, opponent_id, entry_fee, scheduled_at, red_player_id, status, terms_by, gamble_match_id, created_at, updated_at)
+          SELECT id, game_id, challenger_id, opponent_id, entry_fee, scheduled_at, red_player_id, status, terms_by, gamble_match_id, created_at, updated_at FROM challenges;
+        DROP TABLE challenges;
+        ALTER TABLE challenges_v2 RENAME TO challenges;
+      `);
+    } finally {
+      db.pragma('foreign_keys = ON');
+    }
+  }
+} catch (e) {
+  console.error('challenges broadcast rebuild failed:', e);
+}
+
+// Migration: broadcast challenges leave a term's red side undetermined until
+// acceptance, so challenge_terms.red_player_id must be nullable too — same
+// table-rebuild requirement as challenges above.
+try {
+  const cols = db.prepare(`PRAGMA table_info(challenge_terms)`).all() as { name: string; notnull: number }[];
+  if (cols.find(c => c.name === 'red_player_id')?.notnull) {
+    db.pragma('foreign_keys = OFF'); // challenges rows keep their references across the rebuild
+    try {
+      db.exec(`
+        CREATE TABLE challenge_terms_v2 (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          challenge_id INTEGER NOT NULL REFERENCES challenges(id),
+          entry_fee INTEGER NOT NULL,
+          scheduled_at TEXT NOT NULL,
+          red_player_id INTEGER,
+          proposed_by INTEGER NOT NULL,
+          payout_line TEXT NOT NULL DEFAULT 'true_even',
+          special_rules TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO challenge_terms_v2 (id, challenge_id, entry_fee, scheduled_at, red_player_id, proposed_by, payout_line, special_rules, created_at)
+          SELECT id, challenge_id, entry_fee, scheduled_at, red_player_id, proposed_by, payout_line, special_rules, created_at FROM challenge_terms;
+        DROP TABLE challenge_terms;
+        ALTER TABLE challenge_terms_v2 RENAME TO challenge_terms;
+      `);
+    } finally {
+      db.pragma('foreign_keys = ON');
+    }
+  }
+} catch (e) {
+  console.error('challenge_terms nullable-red rebuild failed:', e);
+}
+
+// Simpler column adds for DBs whose challenges table was created before
+// broadcast/payout terms existed (fresh tables already have all of them).
+for (const stmt of [
+  `ALTER TABLE challenges ADD COLUMN challenger_side TEXT NOT NULL DEFAULT 'red'`,
+  `ALTER TABLE challenges ADD COLUMN broadcast INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE challenges ADD COLUMN payout_line TEXT NOT NULL DEFAULT 'true_even'`,
+  `ALTER TABLE challenges ADD COLUMN special_rules TEXT`,
+  `ALTER TABLE challenge_terms ADD COLUMN payout_line TEXT NOT NULL DEFAULT 'true_even'`,
+  `ALTER TABLE challenge_terms ADD COLUMN special_rules TEXT`,
+  `ALTER TABLE gamble_matches ADD COLUMN payout_line TEXT NOT NULL DEFAULT 'true_even'`,
+  `ALTER TABLE gamble_matches ADD COLUMN special_rules TEXT`,
+]) {
+  try { db.exec(stmt); } catch { /* column already exists */ }
+}
+
+// Seed an account for every existing player (new players get accounted via
+// lib/bank.ensureAccount — same INSERT OR IGNORE, so repeated calls are free).
+// Mock/offline mode mints 1000 each; when the central Alces bank is wired,
+// nobody locally mints — unlinked players hold zero until they register.
+const mirrorOn = !!(
+  process.env.ALCES_SERVICE_TOKEN
+  ?? (db.prepare(`SELECT value FROM settings WHERE key = 'alces_service_token'`).get() as
+    | { value: string } | undefined)?.value
+);
+db.prepare(`INSERT OR IGNORE INTO bank_accounts (player_id, balance) SELECT id, ? FROM players`)
+  .run(mirrorOn ? 0 : 1000);
+
 export default db;

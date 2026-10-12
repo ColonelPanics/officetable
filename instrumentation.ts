@@ -8,6 +8,20 @@ export async function register() {
   // runtime (not Edge middleware, where it would fail to load).
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
+  const { alcesMirrorEnabled } = await import('./lib/bank');
+  if (!alcesMirrorEnabled()) {
+    // Loud, every boot: in mock mode the site runs its OWN local mint
+    // (players are seeded 1000 and nothing reaches the Alces Bookie). That
+    // is fine for a distributed/dev copy, but it must never be mistaken
+    // for the real bookie-backed economy.
+    console.warn('!'.repeat(78));
+    console.warn('[bank] MOCK MODE — no ALCES_SERVICE_TOKEN configured.');
+    console.warn('[bank] This site is running its OWN LOCAL MINT (players seeded 1000 each)');
+    console.warn('[bank] and NOTHING reaches the Alces Bookie central bank.');
+    console.warn('[bank] Fine for dev/demos — MUST NOT serve real play in production.');
+    console.warn('!'.repeat(78));
+  }
+
   const { startSeasonHypeScheduler } = await import('./lib/seasonHype');
   startSeasonHypeScheduler();
 }

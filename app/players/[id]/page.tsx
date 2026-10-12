@@ -7,6 +7,7 @@ import { PlayerHeader } from "./components/PlayerHeader";
 import { CareerHighlights } from "./components/CareerHighlights";
 import { GameTabBar } from "./components/GameTabBar";
 import { GameSection } from "./components/GameSection";
+import { GamblingSection } from "./components/GamblingSection";
 
 interface EloHistoryPoint {
   elo: number;
@@ -474,6 +475,9 @@ export default function PlayerProfilePage() {
           })}
         </div>
       )}
+
+      {/* Gambling record — virtual-moose-bucks ledger for this player */}
+      <GamblingSection playerId={parseInt(playerId)} />
     </div>
   );
 }

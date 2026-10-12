@@ -40,6 +40,49 @@ function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+
+/** One row of a two-player face-off: avatar (or person placeholder), accent
+ *  coloured name, optional badge (score, odds, payout). Used by match cards
+ *  and the (much briefer) gambling cards so they share one visual language. */
+export interface FaceOffPlayer {
+  name: string;
+  avatarUrl?: string | null;
+  badge?: string;
+  badgeColor?: string;
+  /** Grey name+badge for the loser / the not-yet-known side. */
+  muted?: boolean;
+}
+
+export function faceOffColumn(player: FaceOffPlayer): Record<string, unknown> {
+  const name = escapeHtml(player.name);
+  const nameColor = player.muted ? MUTED_COLOR : (player.badgeColor ?? MUTED_COLOR);
+  const badge = player.badge
+    ? ` <b><font color="${player.badgeColor ?? MUTED_COLOR}">${escapeHtml(player.badge)}</font></b>`
+    : '';
+  return {
+    horizontalSizeStyle: 'FILL_AVAILABLE_SPACE',
+    horizontalAlignment: 'START' as const,
+    verticalAlignment: 'TOP' as const,
+    widgets: [
+      {
+        decoratedText: {
+          startIcon: {
+            imageType: 'CIRCLE' as const,
+            iconUrl: player.avatarUrl || PERSON_PLACEHOLDER_ICON_URL,
+            altText: player.name,
+          },
+          text: `<b><font color="${nameColor}">${name}</font></b>${badge}`,
+          wrapText: true,
+        },
+      },
+    ],
+  };
+}
+
+export function faceOffWidget(left: FaceOffPlayer, right: FaceOffPlayer): Record<string, unknown> {
+  return { columns: { columnItems: [faceOffColumn(left), faceOffColumn(right)] } };
+}
+
 /**
  * Default "person" icon used as a placeholder for players without an avatar.
  * Kept circular so it crops identically to real avatars.
@@ -317,15 +360,20 @@ export interface AnnouncementMessage {
   subtitle?: string;
   /** HTML paragraphs (safe markup: <b>, <i>, <font color=...>, <a>). */
   paragraphs: string[];
+  /** Any prebuilt widgets (face-offs etc.) rendered before the paragraphs. */
+  widgets?: Record<string, unknown>[];
   /** Optional footer link. */
   linkUrl?: string;
   linkText?: string;
 }
 
 export function buildAnnouncementCardsPayload(message: AnnouncementMessage): Record<string, unknown> {
-  const widgets: Record<string, unknown>[] = message.paragraphs.map(p => ({
-    textParagraph: { text: p }
-  }));
+  const widgets: Record<string, unknown>[] = [
+    ...(message.widgets ?? []),
+    ...message.paragraphs.map(p => ({
+      textParagraph: { text: p }
+    })),
+  ];
 
   widgets.push({ divider: {} });
   if (message.linkUrl) {

@@ -1,7 +1,12 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
-# db
+# db — any database copy: they contain personal data and (unencrypted) bank
+# credentials, so nothing database-shaped may ever be committed
 officetable.db
+officetable*.db
+*.db.*
+*.db.bak
+*.db
 
 # dependencies
 /node_modules

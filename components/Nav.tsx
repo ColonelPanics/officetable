@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { usePathname, useRouter } from 'next/navigation';
 import { useSelectedGame } from '../lib/hooks/useSelectedGame';
 import { useTheme, type ColorMode } from '../lib/contexts/ThemeContext';
 
@@ -17,6 +18,11 @@ export function Nav() {
   const { selectedGame, selectedGameId, games, setSelectedGameId, isLoading } = useSelectedGame();
   const [showGameMenu, setShowGameMenu] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const pathname = usePathname();
+  const router = useRouter();
+  // Gambling isn't a game in the DB, but it lives in the same dropdown as one —
+  // exactly one of {game, gambling} is highlighted at a time.
+  const onGambling = pathname?.startsWith('/gambling') ?? false;
 
   useEffect(() => setMounted(true), []);
 
@@ -63,7 +69,9 @@ export function Nav() {
                     onClick={() => setShowGameMenu(!showGameMenu)}
                     className="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-slate-800 to-slate-900 text-white rounded-lg hover:opacity-90 transition-opacity"
                   >
-                    {selectedGame?.image_url ? (
+                    {onGambling ? (
+                      <span className="text-lg">🎲</span>
+                    ) : selectedGame?.image_url ? (
                       <img
                         src={selectedGame.image_url}
                         alt={selectedGame.name}
@@ -73,7 +81,11 @@ export function Nav() {
                       <span className="text-lg">🎮</span>
                     )}
                     <span className="text-sm font-semibold">
-                      {selectedGame ? formatGameName(selectedGame.name) : 'Select Game'}
+                      {onGambling
+                        ? 'Gambling'
+                        : selectedGame
+                          ? formatGameName(selectedGame.name)
+                          : 'Select Game'}
                     </span>
                     <svg
                       className={`w-4 h-4 transition-transform ${showGameMenu ? 'rotate-180' : ''}`}
@@ -98,9 +110,11 @@ export function Nav() {
                             onClick={() => {
                               setSelectedGameId(game.id);
                               setShowGameMenu(false);
+                              // Picking a game while in the casino takes you back to the leaderboard
+                              if (onGambling) router.push('/');
                             }}
                             className={`w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-gray-100 transition-colors ${
-                              game.id === selectedGameId ? 'bg-gray-50' : ''
+                              !onGambling && game.id === selectedGameId ? 'bg-gray-50' : ''
                             }`}
                           >
                             {game.image_url ? (
@@ -112,14 +126,28 @@ export function Nav() {
                             ) : (
                               <span className="w-5 h-5 flex items-center justify-center">🎮</span>
                             )}
-                            <span className={`text-sm ${game.id === selectedGameId ? 'font-semibold text-primary' : 'text-gray-700'}`}>
+                            <span className={`text-sm ${!onGambling && game.id === selectedGameId ? 'font-semibold text-primary' : 'text-gray-700'}`}>
                               {formatGameName(game.name)}
                             </span>
-                            {game.id === selectedGameId && (
+                            {!onGambling && game.id === selectedGameId && (
                               <span className="ml-auto text-primary">✓</span>
                             )}
                           </button>
                         ))}
+                        {games.length > 0 && <div className="border-t border-gray-200 my-1" />}
+                        <Link
+                          href="/gambling"
+                          onClick={() => setShowGameMenu(false)}
+                          className={`w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-gray-100 transition-colors ${
+                            onGambling ? 'bg-gray-50' : ''
+                          }`}
+                        >
+                          <span className="w-5 h-5 flex items-center justify-center text-base">🎲</span>
+                          <span className={`text-sm ${onGambling ? 'font-semibold text-primary' : 'text-gray-700'}`}>
+                            Gambling
+                          </span>
+                          {onGambling && <span className="ml-auto text-primary">✓</span>}
+                        </Link>
                       </div>
                     </>
                   )}
@@ -141,6 +169,12 @@ export function Nav() {
               className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-primary hover:bg-gray-100 rounded-lg transition-all"
             >
               👥 Players
+            </Link>
+            <Link
+              href="/gambling"
+              className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-primary hover:bg-gray-100 rounded-lg transition-all"
+            >
+              🎲 Gambling
             </Link>
             <Link
               href="/matches/new"

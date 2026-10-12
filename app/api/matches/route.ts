@@ -6,6 +6,10 @@ import { sendGoogleChatNotification, buildMatchNotification } from '@/lib/notifi
 import { getAchievementsForMatch } from '@/lib/achievements';
 import { getPunditryForMatch } from '@/lib/punditry';
 import { resolveScopeSeasonId, getCurrentSeason } from '@/lib/seasons';
+import { syncStatuses, settleGambleMatch, getGambleMatch } from '@/lib/gamble';
+import { announceSettled } from '@/lib/gambleNotifications';
+import { requirePlayerId } from '@/lib/gambleApi';
+import { readSessionPlayer } from '@/lib/session';
 import type { MatchWithParticipants, CreateMatchInput, MatchFilters, PaginationMeta } from '@/lib/types';
 
 export async function GET(request: NextRequest) {
@@ -200,6 +204,75 @@ export async function POST(request: NextRequest) {
           { error: 'All teams must have a valid score (non-negative number)' },
           { status: 400 }
         );
+      }
+    }
+
+    // Gamble settle hook: a 1v1 record whose two participants match an open
+    // gamble match (either orientation) settles that gamble — the match is
+    // recorded once, through settleGambleMatch's own processMatch.
+    //
+    // Trust guard: settling moves real money (player shares + the pot), so the
+    // hook only fires when the record comes from one of the two participants
+    // (pass `recorded_by` = your player id; the gamble match page does this via
+    // its own settle route). A third-party record that matches an open gamble
+    // is rejected — it must not settle the pot, and it must not double-record
+    // the match that the participants' settle will record. If no gamble
+    // matches, recording behaves exactly as before.
+    syncStatuses();
+    const isSolo = (t: CreateMatchInput['teams'][number]) => t.player_ids?.length === 1;
+    if (teams.length === 2 && isSolo(teams[0]) && isSolo(teams[1])) {
+      const [aId, bId] = [teams[0].player_ids[0], teams[1].player_ids[0]];
+      let recordedBy: number | null = null;
+      if (body.recorded_by != null) {
+        try { recordedBy = requirePlayerId(body.recorded_by); } catch { recordedBy = null; }
+      }
+      const gmRow = db.prepare(`
+        SELECT id, red_player_id, blue_player_id FROM gamble_matches
+        WHERE status IN ('open', 'awaiting_score')
+          AND ((red_player_id = ? AND blue_player_id = ?) OR (red_player_id = ? AND blue_player_id = ?))
+        ORDER BY id DESC
+      `).get(aId, bId, bId, aId) as { id: number; red_player_id: number; blue_player_id: number } | undefined;
+      if (gmRow) {
+        // Settling a gamble moves real money, so under the session model the
+        // recorder must be LOGGED IN AS a participant — a body-supplied
+        // recorded_by alone is forgeable by anyone who can reach the API.
+        const sessionPlayer = await readSessionPlayer();
+        if (sessionPlayer === null) {
+          return NextResponse.json(
+            {
+              error: 'This result settles an open gamble — log in (top right) as one of the two participants to record it',
+              code: 'not_logged_in',
+              gamble_match_id: gmRow.id,
+            },
+            { status: 403 }
+          );
+        }
+        if (recordedBy !== null && recordedBy !== sessionPlayer) {
+          return NextResponse.json(
+            { error: "You are logged in as a different player — you can't record a result in someone else's name", code: 'forbidden' },
+            { status: 403 }
+          );
+        }
+        if (sessionPlayer !== aId && sessionPlayer !== bId) {
+        if (recordedBy === null || (recordedBy !== aId && recordedBy !== bId)) {
+          return NextResponse.json(
+            {
+              error: 'This result settles an open gamble — only one of the two participants may record it (from the gamble match page, or pass recorded_by)',
+              code: 'not_a_participant',
+              gamble_match_id: gmRow.id,
+            },
+            { status: 409 }
+          );
+        }
+        }
+        const [redTeam, blueTeam] = teams[0].player_ids[0] === gmRow.red_player_id
+          ? [teams[0], teams[1]]
+          : [teams[1], teams[0]];
+        const summary = settleGambleMatch(gmRow.id, [redTeam, blueTeam], notes);
+        const gmFull = getGambleMatch(gmRow.id)!;
+        announceSettled(gmFull, summary).catch(err => console.error('gamble announce failed:', err));
+        revalidatePath('/', 'layout');
+        return NextResponse.json({ success: true, gamble_match_id: gmRow.id, summary }, { status: 201 });
       }
     }
 

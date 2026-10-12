@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "seed-gambling": "tsx scripts/seed-gambling-demo.ts",
+    "gamble-smoke": "tsx scripts/gamble-smoke.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.8.0",

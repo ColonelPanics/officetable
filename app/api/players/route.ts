@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { revalidatePath } from 'next/cache';
 import db from '@/lib/db';
+import { getBank } from '@/lib/bank';
 import type { Player } from '@/lib/types';
 
 export async function GET(request: NextRequest) {
@@ -48,6 +49,9 @@ export async function POST(request: NextRequest) {
     const stmt = db.prepare('INSERT INTO players (name) VALUES (?)');
     const result = stmt.run(name.trim());
     const player = db.prepare('SELECT id, name, status, created_at, avatar_url FROM players WHERE id = ?').get(result.lastInsertRowid) as Player;
+
+    // New player opens a bank account with the seed balance
+    getBank().ensureAccount(player.id);
 
     revalidatePath('/', 'layout');
     return NextResponse.json(player, { status: 201 });
