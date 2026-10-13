@@ -46,7 +46,7 @@ export const GAMBLE_RULES = {
   /** Challenges expire unless accepted this many minutes before the deadline. */
   challengeExpiryLeadMinutes: 5,
   /** Games with no result this many minutes after the deadline are voided (refunds). */
-  resultDeadlineMinutes: 15,
+  resultDeadlineMinutes: 120,
   /** Cap on the free-text special rules note. */
   maxSpecialRulesLength: 500,
 } as const;
