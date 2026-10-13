@@ -22,6 +22,18 @@ const MUTED = '#9aa0a6';
 
 const moose = (n: number) => `${n.toLocaleString()} moose bucks`;
 
+/**
+ * One-line house-rules note for the chat card. Long rules get truncated — the
+ * full text is always on the match/challenge page, where the link points.
+ */
+function specialRulesLine(specialRules: string | null | undefined): string | null {
+  const text = specialRules?.trim();
+  if (!text) return null;
+  const MAX = 160;
+  const shown = text.length > MAX ? `${text.slice(0, MAX - 1).trimEnd()}…` : text;
+  return `📜 <i>${shown.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</i>${text.length > MAX ? ' — <b>full rules on the page</b>' : ''}`;
+}
+
 /** avatar_url per player id for card icons (missing = person placeholder). */
 export function avatarMapFor(playerIds: number[]): Map<number, string> {
   if (!playerIds.length) return new Map();
@@ -82,7 +94,9 @@ export async function announceChallengeIssued(challenge: Challenge): Promise<voi
   const message: AnnouncementMessage = {
     title: '⚔️ Challenge issued',
     subtitle: challenge.game_name ?? undefined,
-    paragraphs: [line],
+    paragraphs: [specialRulesLine(challenge.special_rules), line].filter(
+      (p): p is string => p != null,
+    ),
     widgets: [faceOffWidget(redFinal, blueRow)],
     linkUrl: gameMatchUrl(challenge.id, 'challenges'),
     linkText: challenge.broadcast ? 'Accept it' : 'Respond',
@@ -96,7 +110,10 @@ export async function announceBetsOpen(gambleMatch: GambleMatch): Promise<void> 
   const message: AnnouncementMessage = {
     title: '🎲 Bets are open',
     subtitle: gambleMatch.game_name,
-    paragraphs: [`${moose(gambleMatch.entry_fee)} each on the line — close your picks before it starts.`],
+    paragraphs: [
+      specialRulesLine(gambleMatch.special_rules),
+      `${moose(gambleMatch.entry_fee)} each on the line — close your picks before it starts.`,
+    ].filter((p): p is string => p != null),
     widgets: [
       faceOffWidget(
         { name: gambleMatch.red_player_name ?? 'Player', avatarUrl: avatars.get(gambleMatch.red_player_id), badgeColor: RED },
@@ -116,7 +133,9 @@ export async function announceBetsClosed(gambleMatch: GambleMatch): Promise<void
   const message: AnnouncementMessage = {
     title: '⏰ Betting closed — to the table!',
     subtitle: gambleMatch.game_name,
-    paragraphs: [],
+    paragraphs: [specialRulesLine(gambleMatch.special_rules)].filter(
+      (p): p is string => p != null,
+    ),
     widgets: [
       faceOffWidget(
         { name: gambleMatch.red_player_name ?? 'Player', avatarUrl: avatars.get(gambleMatch.red_player_id), badgeColor: RED },
