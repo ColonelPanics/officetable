@@ -4,16 +4,31 @@
 // The site is a bookie on this bank: players register their OWN accounts
 // (manually — the bank mints 500 at signup, so it is the money's truth), and
 // every movement the gambling engine makes is mirrored here as a real
-// house<->player transfer through outbox rows (lib/bank.ts bank_sync).
+// player↔bookie-pot transfer through outbox rows (lib/bank.ts bank_sync).
 //
-// Probed behaviour worth remembering:
+// Probed behaviour worth remembering (migrated to the bank's 2026-10 API):
 //  - Balances are only readable via GET /users pagination (strings, can be
-//    fractional — the bank skims 2% of every receipt off to its own 'bank'
-//    user); GET /users/{username} answers 204 with no body.
-//  - Transfers authenticate as the SENDER body {username, password, amount};
-//    the recipient is the path user. Bad creds → 400 UNAUTHORISED, not
-//    enough money → 400 BAD_REQUEST "… does not have enough to send …",
-//    duplicate user → 409 CONFLICTING_RESOURCE, missing user → 404 NOT_FOUND.
+//    fractional); GET /users/{username} answers 204 with no body.
+//  - Plain user-to-user transfers are now POST /users/transaction/{recipient}
+//    and authenticate as the SENDER in the body {username, password, amount}.
+//    The old POST /transactions/{username} is GONE from the bank's API.
+//  - Bookie transfers are POST /services/transaction, body {username,
+//    password, serviceToken, amount, type}. They authenticate as the PLAYER
+//    and have NO recipient: the counterparty is OUR SERVICE'S POT, resolved
+//    from the token (readable via GET /services/{name}). `type` picks the
+//    direction — 'loss' = the player pays the pot (stake/debit), 'win' = the
+//    pot pays the player (payout/credit). The old
+//    POST /transactions/service/{username} is deprecated but still live.
+//  - Fees: receipts into an account are skimmed and the skim shows up
+//    between ledger rows (NOT in a row's before/after) — ~1% under the new
+//    service endpoint (probed: a 20-buck receipt lost 0.2), ~2% on the
+//    deprecated service endpoint, ~5% plain. Balance-verified retries need
+//    fee slack on skimmed sides.
+//  - Errors: bad creds → 401 UNAUTHORISED, not enough money → 400
+//    BAD_REQUEST "… does not have enough to send …", duplicate user → 409
+//    CONFLICTING_RESOURCE, missing user → 404 NOT_FOUND, and a bad
+//    serviceToken → 404 NOT_FOUND "No service with that token exists"
+//    (NOT the 500 the old bank version answered with).
 
 import db from './db';
 import { decryptSecret, encryptSecret } from './crypto';
@@ -149,7 +164,7 @@ async function alcesRequest(path: string, init?: RequestInit): Promise<Rest> {
       ...init,
       headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
     });
-  } catch (e) {
+  } catch {
     downUntil = Date.now() + OUTAGE_BACKOFF_MS;
     throw new AlcesBankError(`Alces bank unreachable at ${baseUrl}`, 'unreachable');
   }
@@ -236,23 +251,21 @@ export async function deleteAlcesUser(username: string, password: string): Promi
   });
 }
 
-export interface TransferOpts {
-  /** The SENDER's bank credentials. */
-  fromUser: string;
-  fromPassword: string;
-  /** The RECIPIENT's bank username. */
-  toUser: string;
+export interface ServiceTransferOpts {
+  /** The player's bank account — BOTH legs authenticate as the player.
+   *  (The pot has no credentials and is resolved from the service token.) */
+  username: string;
+  password: string;
+  /** Positive transfer amount; the bank rejects < 1. */
   amount: number;
-  /** Optional service mediation (our bookie token) — records the transfer under our service. */
-  viaService?: boolean;
+  /** Direction: 'loss' = the player pays the pot (stake/debit),
+   *  'win' = the pot pays the player (payout/credit). */
+  type: 'win' | 'loss';
 }
 
-/** One central-bank transfer. Sender body creds, recipient is the path user.
- *
- *  NOTE (probed, may differ bank-version to bank-version): the service
- *  endpoint 500s when the serviceToken is wrong; a VALID token transfers
- *  normally (204, moves money, ~2% receipt skim vs ~5% on the plain
- *  endpoint).
+/** One bookie transfer through our service pot: POST /services/transaction.
+ *  204 on success; the money moves player↔pot under our service's ledger,
+ *  and the pot's balance is readable via GET /services/{name}.
  *
  *  There is deliberately NO fallback to the plain endpoint on service errors:
  *  a service failure may mean "nothing moved" or "moved but the response was
@@ -260,20 +273,56 @@ export interface TransferOpts {
  *  the second case. Service-path failures instead fail the sync job, and the
  *  drain's balance-verified retry (drainBankSync) re-sends only after
  *  proving on the bank's balances that the first attempt never landed. If
- *  this fires repeatedly, check ALCES_SERVICE_TOKEN and the bank's service
- *  endpoint (invalid token = 500 on every transfer). */
-export async function transferAlces({ fromUser, fromPassword, toUser, amount, viaService }: TransferOpts): Promise<void> {
+ *  this fires repeatedly, check ALCES_SERVICE_TOKEN (an invalid token is a
+ *  404 NOT_FOUND "No service with that token exists" on every transfer). */
+export async function alcesServiceTransfer({ username, password, amount, type }: ServiceTransferOpts): Promise<void> {
   const { serviceToken } = alcesConfig();
-  const body: Record<string, unknown> = { username: fromUser, password: fromPassword, amount };
-  if (!viaService) {
-    await alcesRequest(`/transactions/${toUser}`, { method: 'POST', body: JSON.stringify(body) });
-    return;
-  }
   if (!serviceToken) {
     // Mirror shouldn't be enabled without a token, but stay honest if it flips off.
-    await alcesRequest(`/transactions/${toUser}`, { method: 'POST', body: JSON.stringify(body) });
-    return;
+    throw new AlcesBankError('Bookie service token is not configured', 'no_service_token');
   }
-  body.serviceToken = serviceToken;
-  await alcesRequest(`/transactions/service/${toUser}`, { method: 'POST', body: JSON.stringify(body) });
+  try {
+    await alcesRequest('/services/transaction', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, serviceToken, amount, type }),
+    });
+  } catch (e) {
+    // A 404 on this endpoint can only mean the token resolves no service —
+    // surface it as a distinct, fixable condition instead of "account does
+    // not exist".
+    if (e instanceof AlcesBankError && e.code === 'not_found') {
+      throw new AlcesBankError(
+        'The bank does not recognise this site\'s service token — every transfer will fail. Fix ALCES_SERVICE_TOKEN (404 "No service with that token exists").',
+        'bad_service_token',
+      );
+    }
+    throw e;
+  }
+}
+
+/** Plain sender→recipient transfer: POST /users/transaction/{recipient}.
+ *  Replaces the removed POST /transactions/{username}; used only as the
+ *  tokenless fallback in the drain (the bank skims ~5% on this path). */
+export async function alcesPlainTransfer(toUser: string, fromUser: string, fromPassword: string, amount: number): Promise<void> {
+  await alcesRequest(`/users/transaction/${toUser}`, {
+    method: 'POST',
+    body: JSON.stringify({ username: fromUser, password: fromPassword, amount }),
+  });
+}
+
+/** Our service pot's balance at the bank (GET /services/{name}) — the truth
+ *  the payout legs settle against and drain payouts verify against.
+ *  Resolves null when the bank is unreachable or the answer is malformed;
+ *  callers must treat null as "cannot verify / do not send". */
+export async function alcesServiceBalance(): Promise<number | null> {
+  const { serviceName } = alcesConfig();
+  try {
+    const { body } = await alcesRequest(`/services/${serviceName}`);
+    const balance = body?.balance as unknown;
+    if (typeof balance === 'number' && Number.isFinite(balance)) return balance;
+    if (typeof balance === 'string' && balance !== '' && Number.isFinite(parseFloat(balance))) return parseFloat(balance);
+    return null;
+  } catch {
+    return null; // unreachable right now (or service vanished) — caller backs off
+  }
 }

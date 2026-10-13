@@ -6,8 +6,9 @@
 //
 // The central bank is the Alces Bookie API (lib/alcesBank.ts) — "bank is the
 // truth". The SQLite ledger remains the gambling engine's bookkeeping, and
-// every PLAYER movement is mirrored out as a real house<->player transfer via
-// the bank_sync outbox (drained asynchronously; retries until done). A
+// every PLAYER movement is mirrored out as a real player↔bookie-pot transfer
+// (POST /services/transaction — lib/alcesBank.ts) via the bank_sync outbox
+// (drained asynchronously; retries until done). A
 // central-office bank API only needs to implement BankProvider — call sites
 // in lib/gamble.ts and the routes don't change.
 
@@ -18,10 +19,12 @@ import {
   alcesBalance,
   alcesConfig,
   alcesMirrorEnabled,
+  alcesPlainTransfer,
+  alcesServiceBalance,
+  alcesServiceTransfer,
   listAlcesBalances,
   loginAlcesUser,
   registerAlcesUser,
-  transferAlces,
 } from './alcesBank';
 
 export { alcesMirrorEnabled };
@@ -223,7 +226,7 @@ export function assertBankLinked(playerId: number): void {
  * Bookie account and record their credentials for future transfers.
  * BOTH actions prove themselves with the bank's login handshake: a wrong
  * password is rejected here instead of poisoning the sync queue later (and
- * house payouts can never be parked on an account that isn't the linker's).
+ * pot payouts can never be parked on an account that isn't the linker's).
  * Returns the account's real (bank-side) balance.
  */
 export async function linkBankAccount(
@@ -350,11 +353,19 @@ const MAX_SYNC_ATTEMPTS = 10;
  *  strings and the bank itself is imprecise about rounding). */
 const BALANCE_EPS = 0.005;
 
+/** The bank skims a fee off RECEIPTS, visibly only between ledger rows —
+ *  so payout legs that verify against the pot's (or fallback house's)
+ *  balance tolerate a skim fraction (~1% under the service-pot endpoint)
+ *  plus round-off in their landed check. */
+const FEE_SLACK_PCT = 0.011;
+
 /** Push queued movements to the central bank. Fire-and-forget; never throws.
  *
  *  Delivery safety (the bank has no idempotency keys, so a retry after a
  *  lost response used to mean a double-send): before every attempt the
- *  sender's real bank-side balance is snapshotted into bank_sync.pre_balance.
+ *  PAYING balance is snapshotted into bank_sync.pre_balance — the player's
+ *  balance for staking legs ('loss'), our service's bookie pot for payout
+ *  legs ('win').
  *  Any job whose previous attempt did not end with a clean acknowledgement is
  *  VERIFIED first against a fresh balance read:
  *    fresh == pre_balance           → never landed → safe to (re)send
@@ -367,9 +378,12 @@ export async function drainBankSync(): Promise<void> {
   if (!alcesMirrorEnabled() || draining) return;
   draining = true;
   try {
-    await ensureAlcesHouse();
-    const { houseUser, housePassword } = alcesConfig();
-    if (!housePassword) return;
+    // Since the 2026-10 service-pot format, bookie legs NEVER touch the house
+    // user — the counterparty is our service pot, resolved from the token. No
+    // ensureAlcesHouse() here; house credentials only matter for the tokenless
+    // plain-transfer fallback below. (ensureAlcesHouse stays in the link path,
+    // where account registration actually needs it.)
+    const { houseUser, housePassword, serviceToken, serviceName } = alcesConfig();
     // 'sending' = a crash leftover mid-flight attempt (needs verification).
     // 'unverified' never auto-retries — only an explicit resync re-arms it,
     // and even then it goes through the balance verification first.
@@ -412,7 +426,23 @@ export async function drainBankSync(): Promise<void> {
           throw new BankError('Player bank credentials cannot be decrypted', 'bank_not_linked');
         }
         const transferAmount = Math.abs(tx.amount);
-        const fromUser = tx.amount < 0 ? account.bank_username : houseUser;
+        const debit = tx.amount < 0;
+        const playerUser = account.bank_username;
+
+        // The paying balance is the verification side:
+        //   debit  ('loss': the player pays our pot)  → the PLAYER's balance
+        //   credit ('win':  our pot pays the player)  → the SERVICE POT's
+        //     balance, falling back to the HOUSE's on the tokenless plain path.
+        // The tokenless fallback can only happen if the mirror's token flips
+        // off between the enable-check and the send.
+        const fallback = !serviceToken;
+        const readFresh = async (): Promise<Map<string, number> | number | null> =>
+          debit || fallback
+            ? listAlcesBalances().catch(() => null)
+            : alcesServiceBalance(); // null = pot unreadable → treat as unreachable
+        const holderOf = (fresh: Map<string, number> | number): number | undefined =>
+          typeof fresh === 'number' ? fresh : fresh.get(debit || fallback ? (debit ? playerUser : houseUser) : '');
+        const holderLabel = debit || fallback ? (debit ? playerUser : houseUser) : `the ${serviceName} pot`;
 
         // ---- delivery verification for anything already attempted ----
         // The snapshot (pre_balance) is recorded just before every send, so
@@ -427,29 +457,34 @@ export async function drainBankSync(): Promise<void> {
             markUnverified.run('Prior attempt mid-flight with no balance snapshot recorded — verify by hand on the bank, then re-arm via resync.', job.id);
             continue;
           }
-          const fresh = await listAlcesBalances().catch(() => null);
+          const fresh = await readFresh();
           if (fresh === null) {
-            // Bank unreachable — abort this drain; nothing was sent, and the
-            // next drain will re-verify from the stored snapshot.
+            // Bank (or the service pot) unreadable — abort this drain; nothing
+            // was sent, and the next drain will re-verify from the snapshot.
             return;
           }
-          const now = fresh.get(fromUser);
+          const now = holderOf(fresh);
           if (now === undefined) {
-            markUnverified.run(`Expected sender ${fromUser} not found on the bank — manual verification required.`, job.id);
+            markUnverified.run(`Expected payer ${holderLabel} not found on the bank — manual verification required.`, job.id);
             continue;
           }
-          if (Math.abs(now - (job.pre_balance - transferAmount)) < BALANCE_EPS) {
+          // The bank skims a fee off RECEIPTS between rows (lib/alcesBank.ts),
+          // so a payout leg's payer (pot/house) may land a skim fraction short
+          // of exactly the amount — the landed check carries fee slack. Stakes
+          // verify on the exact-paying player balance (no slack).
+          const feeSlack = debit ? 0 : FEE_SLACK_PCT * transferAmount;
+          if (Math.abs(now - (job.pre_balance - transferAmount)) < BALANCE_EPS + feeSlack) {
             // The prior attempt DID land despite being recorded as a failure.
             markDone.run(job.id);
             progress = true;
             continue;
           }
           if (Math.abs(now - job.pre_balance) >= BALANCE_EPS) {
-            // Sender's balance moved by neither 0 nor exactly the amount —
+            // Payer's balance moved by neither 0 nor exactly the amount —
             // something outside our ledger touched this account (another
             // service, a player's own bank transfer). Never auto-resend.
             markUnverified.run(
-              `Cannot verify delivery: sender ${fromUser} was ${job.pre_balance} on the bank,` +
+              `Cannot verify delivery: payer ${holderLabel} was ${job.pre_balance} on the bank,` +
               ` expected ${job.pre_balance - transferAmount} if the prior attempt landed,` +
               ` but the bank shows ${now}. Verify by hand, then re-arm via resync.`, job.id);
             continue;
@@ -458,24 +493,43 @@ export async function drainBankSync(): Promise<void> {
           // through and send now.
         }
 
-        // Fresh pre-send snapshot (used by any future verification).
-        const pre = (await listAlcesBalances()).get(fromUser) ?? null;
+        // Fresh pre-send snapshot (used by any future verification). No read →
+        // abort WITHOUT staging (a null snapshot would park the job as
+        // unverifiable at every later retry; better to wait and read again —
+        // the missing-player `?? null` case below keeps the old semantics).
+        const preFresh = await readFresh();
+        if (preFresh === null) return;
+        const pre = holderOf(preFresh) ?? null;
         db.prepare(`
           UPDATE bank_sync SET status = 'sending', pre_balance = ? WHERE id = ?
         `).run(pre, job.id);
 
-        if (tx.amount < 0) {
-          // Debit: player pays the exact ledgered amount to the house.
-          await transferAlces({
-            fromUser: account.bank_username, fromPassword,
-            toUser: houseUser, amount: -tx.amount, viaService: true,
-          });
+        if (debit) {
+          // Debit: the player stakes/pays the exact ledgered amount into our
+          // service pot, authenticated as the player (the token resolves the
+          // pot — there is no recipient under the new format).
+          if (serviceToken) {
+            await alcesServiceTransfer({
+              username: playerUser, password: fromPassword,
+              amount: transferAmount, type: 'loss',
+            });
+          } else {
+            // Tokenless fallback: plain player→house (≈5% receipt skim on the
+            // house, but the mirror's delivery guarantees are identical).
+            await alcesPlainTransfer(houseUser, playerUser, fromPassword, transferAmount);
+          }
         } else {
-          // Credit: the house pays the player.
-          await transferAlces({
-            fromUser: houseUser, fromPassword: housePassword,
-            toUser: account.bank_username, amount: tx.amount, viaService: true,
-          });
+          // Credit: our pot pays the player, authenticated as the player.
+          if (serviceToken) {
+            await alcesServiceTransfer({
+              username: playerUser, password: fromPassword,
+              amount: transferAmount, type: 'win',
+            });
+          } else {
+            if (!housePassword) throw new BankError('No house password for the tokenless plain-transfer fallback', 'bank_disabled');
+            // Tokenless fallback: the house pays the player on the plain path.
+            await alcesPlainTransfer(playerUser, houseUser, housePassword, transferAmount);
+          }
         }
         // NOTE: pre_balance is deliberately NOT cleared here — a done row
         // that ever gets re-armed verifies against it instead of re-sending.
@@ -589,15 +643,21 @@ export async function reconcileAlcesBalances(): Promise<void> {
   } catch {
     return; // unreachable right now — try again on the next drain
   }
-  applyBalanceResync(balances);
+  // Also read our service pot's balance (the 2026-10 format's house truth —
+  // see applyBalanceResync). A failed read just degrades to the legacy
+  // house-user-only snap below.
+  const potBalance = await alcesServiceBalance();
+  applyBalanceResync(balances, potBalance);
 }
 
 /** Apply a bookie-truth balance snapshot to the local projections (players
  *  and house). Exported for tests; reconcileAlcesBalances is its only
  *  production caller. Every non-dust delta is ledgered as a 'resync' row
  *  (player_id NULL for the house), NOT queued to bank_sync — these rows
- *  describe movements that already exist centrally. */
-export function applyBalanceResync(balances: Map<string, number>): void {
+ *  describe movements that already exist centrally. `potBalance` is our
+ *  service pot's balance (null = unreadable → house truth degrades to the
+ *  legacy house-user balance alone). */
+export function applyBalanceResync(balances: Map<string, number>, potBalance: number | null = null): void {
   const rows = db.prepare(`
     SELECT player_id, balance, bank_username FROM bank_accounts
     WHERE bank_username IS NOT NULL
@@ -627,16 +687,21 @@ export function applyBalanceResync(balances: Map<string, number>): void {
         .run(truth, row.player_id);
     })();
   }
-  // The house pot includes everything players actually paid in — entry fees,
-  // stakes, and the house user's own mint on the central bank. Snap it onto
-  // that central truth so payout/bet caps use the REAL bank holdings (a
-  // fresh reset otherwise shows a 0 pot and blocks bets).
-  // Cheap secret-free house-user read: resync never needs to decrypt bank
-  // credentials (it only reads balances) — pulling the full alcesConfig()
-  // would make the snap fail on machines without the encryption key.
+  // The house pot's central truth is the bookie SERVICE pot under the
+  // 2026-10 format — stakes pay in and payouts pay out of the pot resolved
+  // from our service token (GET /services/{name}). The legacy house user's
+  // balance still counts alongside it: its mint and all pre-migration
+  // mirrors are stranded there (nothing can move them into the pot), but
+  // they remain house assets. Snap onto the combined truth so payout/bet
+  // caps use the REAL bank holdings (a fresh reset otherwise shows a 0 pot
+  // and blocks bets). Cheap secret-free reads throughout — resync never
+  // needs to decrypt credentials (it only reads balances).
   const houseUserSetting = db.prepare(`SELECT value FROM settings WHERE key = 'alces_house_user'`).get() as { value: string } | undefined;
   const houseUser = process.env.ALCES_HOUSE_USER || houseUserSetting?.value || 'officetablehouse';
-  const houseTruth = balances.get(houseUser);
+  const houseTruthRaw = balances.get(houseUser); // undefined unless the legacy house user still exists
+  const houseTruth = potBalance === null
+    ? houseTruthRaw // degraded legacy behaviour: house user alone
+    : (houseTruthRaw ?? 0) + potBalance;
   if (houseTruth === undefined) return;
   const houseDelta = Math.round((houseTruth - sqliteBank.getHouseBalance()) * 100) / 100;
   if (Math.abs(houseDelta) < BALANCE_EPS) {
@@ -650,7 +715,7 @@ export function applyBalanceResync(balances: Map<string, number>): void {
     db.prepare(`
       INSERT INTO bank_transactions (ref_type, ref_id, player_id, amount, memo)
       VALUES ('resync', NULL, NULL, ?, ?)
-    `).run(houseDelta, `house pot resynced to bookie truth (δ ${houseDelta > 0 ? '+' : ''}${houseDelta.toFixed(2)})`);
+    `).run(houseDelta, `house pot resynced to bookie truth (service pot${houseTruthRaw !== undefined ? ' + house user' : ''}, δ ${houseDelta > 0 ? '+' : ''}${houseDelta.toFixed(2)})`);
     db.prepare(`UPDATE bank_house SET balance = ? WHERE id = 1`).run(houseTruth);
   })();
 }
