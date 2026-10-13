@@ -119,6 +119,12 @@ export default function GambleMatchPage() {
 
   async function enterScore() {
     if (!me || !detail) return;
+    const redName = detail.match.red_player_name ?? 'Red player';
+    const blueName = detail.match.blue_player_name ?? 'Blue player';
+    if (!confirm(
+      `Is ${redName} ${scoreRed}–${scoreBlue} ${blueName} the correct score?\n\n` +
+      'This records the match, settles every bet and pays out — it cannot be undone.',
+    )) return;
     setBusy(true);
     setError(null);
     try {
@@ -501,6 +507,10 @@ function CorrectScorePanel({ gm, finalScore, onDone }: {
 
   async function correct() {
     if (!me) return;
+    if (!confirm(
+      `Is ${(gm.red_player_name ?? 'Red player')} ${red}–${blue} ${(gm.blue_player_name ?? 'Blue player')} correct?\n\n` +
+      'Replays the recorded match and re-marks every bet result.',
+    )) return;
     setBusy(true);
     setError(null);
     try {
