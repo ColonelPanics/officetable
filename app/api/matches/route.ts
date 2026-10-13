@@ -362,8 +362,15 @@ export async function POST(request: NextRequest) {
       rankChanges.set(playerId, before - after);
     }
 
-    // Get achievements earned in this match
+    // Get achievements earned in this match (payout shown once per player —
+    // achievementPayouts holds each player's TOTAL paid for the match)
+    const payoutShown = new Set<number>();
     const matchAchievements = getAchievementsForMatch(result.matchId);
+    const matchAchievementsWithPayout = matchAchievements.map(a => {
+      const firstForPlayer = !payoutShown.has(a.player_id);
+      payoutShown.add(a.player_id);
+      return { ...a, payout: firstForPlayer ? result.achievementPayouts.get(a.player_id) : undefined };
+    });
 
     // Get punditry facts for this match
     const punditryFacts = getPunditryForMatch(result.matchId);
@@ -379,10 +386,11 @@ export async function POST(request: NextRequest) {
         game.image_url,
         notes,
         rankChanges,
-        matchAchievements.map(a => ({
+        matchAchievementsWithPayout.map(a => ({
           playerId: a.player_id,
           achievementName: a.achievement_name,
-          achievementIcon: a.achievement_icon
+          achievementIcon: a.achievement_icon,
+          payout: a.payout
         })),
         punditryFacts.map(p => ({ description: p.description })),
         playerAvatarMap

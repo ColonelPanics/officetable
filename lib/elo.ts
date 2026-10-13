@@ -162,6 +162,9 @@ export interface ProcessedMatch {
   skillChangesAllTime: Map<number, { before: number; after: number; change: number }>;
   /** Season the match was assigned to (resolved from played_at). */
   seasonId: number;
+  /** Moose bucks paid from the table's pot per player for achievements
+   *  earned in this match (players with no payout are absent). */
+  achievementPayouts: Map<number, number>;
 }
 
 /**
@@ -212,10 +215,11 @@ export function processMatch(input: CreateMatchInput, matchTimestamp?: Date): Pr
 
   // Use transaction for atomicity
   let matchId: number = 0;
+  const playedAtDb = matchDate.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
 
   const updateRatings = db.transaction(() => {
     // Create match record with timestamp
-    const playedAt = matchDate.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
+    const playedAt = playedAtDb;
     const matchResult = insertMatch.run(game_id, notes || null, playedAt, seasonId);
     matchId = matchResult.lastInsertRowid as number;
 
@@ -264,21 +268,31 @@ export function processMatch(input: CreateMatchInput, matchTimestamp?: Date): Pr
     }))
   );
 
+  // Real player names for achievement metadata (victim/opponent names on
+  // the_dominator / comrades / fresh_blood rows).
+  const playerNameMap = playerNameMapFor(participants.map(p => p.player_id));
+
+  // Check achievements (scoped to the match's own season). Live recording
+  // pays the achievement payout out of the table's pot; recalculation and
+  // replay paths never pass payFromPot.
   const achievementResults = checkAchievements({
     matchId,
     gameId: game_id,
     seasonId,
     playedAt: matchDate,
+    playedAtDb,
     teams,
     participants,
-    playerNameMap: new Map() // Will be populated by caller if needed
+    playerNameMap
   });
 
-  if (achievementResults.length > 0) {
-    saveAchievements(achievementResults, game_id, seasonId);
-  }
+  // Save achievements. earned_at is stamped from the match's own timestamp;
+  // the pot payout happens only on this live path.
+  const achievementPayouts = achievementResults.length > 0
+    ? saveAchievements(achievementResults, game_id, seasonId, { payFromPot: true })
+    : new Map<number, number>();
 
-  return { matchId, skillChanges, skillChangesAllTime, seasonId };
+  return { matchId, skillChanges, skillChangesAllTime, seasonId, achievementPayouts };
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +501,19 @@ function replayCore(ctx: ReplayContext): Map<number, number> {
 }
 
 /**
+ * Real player names for achievement metadata (victim/opponent names on
+ * the_dominator / comrades / fresh_blood rows).
+ */
+function playerNameMapFor(ids: number[]): Map<number, string> {
+  if (ids.length === 0) return new Map();
+  return new Map(
+    (db.prepare(
+      `SELECT id, name FROM players WHERE id IN (${ids.map(() => '?').join(',')})`
+    ).all(...ids) as { id: number; name: string }[]).map(r => [r.id, r.name])
+  );
+}
+
+/**
  * Re-check achievements for replayed matches (each scoped to its own season).
  */
 function recheckAchievementsForReplay(
@@ -511,9 +538,10 @@ function recheckAchievementsForReplay(
       gameId,
       seasonId,
       playedAt,
+      playedAtDb: normalisePlayedAt(matchData.timestamp),
       teams: matchData.teams,
       participants,
-      playerNameMap: new Map()
+      playerNameMap: playerNameMapFor(participants.map(p => p.player_id))
     });
 
     if (achievementResults.length > 0) {

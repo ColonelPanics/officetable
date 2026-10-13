@@ -24,4 +24,28 @@ export async function register() {
 
   const { startSeasonHypeScheduler } = await import('./lib/seasonHype');
   startSeasonHypeScheduler();
+
+  // One-off stabilised recalculation of achievements. The achievement engine
+  // now ranks only the ladder as each match's own moment saw it (retired and
+  // inactive players excluded, board values rebuilt from match history) and
+  // stamps earned_at from the match timestamp — so this re-derives every
+  // historical achievement deterministically (and pays nothing; payouts only
+  // happen on live recording). Guarded by a settings flag so it runs once.
+  try {
+    const db = (await import('./lib/db')).default;
+    const flag = 'achievements_roster_recalc_v1';
+    const done = db.prepare(`SELECT value FROM settings WHERE key = ?`).get(flag);
+    if (!done) {
+      const { recalculateAllAchievements } = await import('./lib/achievements');
+      const results = recalculateAllAchievements();
+      db.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`)
+        .run(flag, new Date().toISOString());
+      const summary = results
+        .map(r => `${r.game_name}: ${r.achievements_awarded} across ${r.matches_processed} matches`)
+        .join(', ');
+      console.log(`[achievements] one-off stabilised recalculation complete — ${summary}`);
+    }
+  } catch (e) {
+    console.error('[achievements] one-off recalculation failed (will not block boot):', e);
+  }
 }

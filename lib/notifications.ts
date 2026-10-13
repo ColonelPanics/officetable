@@ -19,6 +19,8 @@ interface MatchNotification {
     playerName: string;
     achievementName: string;
     achievementIcon?: string | null;
+    /** Moose bucks paid from the table's pot for this achievement, when it paid. */
+    payout?: number;
   }[];
   punditry?: {
     description: string;
@@ -214,7 +216,8 @@ export function buildChatCardsPayload(match: MatchNotification): Record<string, 
       .map(a => {
         const icon = a.achievementIcon || '\u{1F3C5}';
         const name = a.achievementName.replace(/_/g, ' ');
-        return `${icon} <b>${a.playerName}</b>: ${name}`;
+        const payout = a.payout ? ` <i>(+${a.payout} moose bucks)</i>` : '';
+        return `${icon} <b>${a.playerName}</b>: ${name}${payout}`;
       })
       .join('  \u00b7  ');
     widgets.push({
@@ -311,7 +314,7 @@ export function buildMatchNotification(
   imageUrl?: string | null,
   notes?: string | null,
   rankChanges?: Map<number, number>,
-  achievements?: { playerId: number; achievementName: string; achievementIcon?: string | null }[],
+  achievements?: { playerId: number; achievementName: string; achievementIcon?: string | null; payout?: number }[],
   punditry?: { description: string }[],
   playerAvatars?: Map<number, string>
 ): MatchNotification {
@@ -341,7 +344,8 @@ export function buildMatchNotification(
     achievements: achievements?.map(a => ({
       playerName: playerNames.get(a.playerId) || `Player ${a.playerId}`,
       achievementName: a.achievementName,
-      achievementIcon: a.achievementIcon
+      achievementIcon: a.achievementIcon,
+      payout: a.payout
     })),
     punditry: punditry?.map(p => ({ description: p.description })),
     timestamp: new Date().toISOString()

@@ -496,6 +496,23 @@ const updateAchievementIcons = db.prepare(`
 `);
 updateAchievementIcons.run();
 
+// Migration: an achievement's earned_at must be the moment it was EARNED —
+// the match's own timestamp — not the moment the achievement check ran.
+// Live inserts under the new saveAchievements already stamp the match time;
+// this back-fills historical rows (which all carry the check-run instant,
+// e.g. the batch stamped when the ladder went live). Idempotent: once every
+// row agrees with its match, the WHERE clause matches nothing.
+try {
+  db.exec(`
+    UPDATE player_achievements
+    SET earned_at = (SELECT played_at FROM matches WHERE matches.id = player_achievements.match_id)
+    WHERE match_id IS NOT NULL
+      AND earned_at != (SELECT played_at FROM matches WHERE matches.id = player_achievements.match_id)
+  `);
+} catch (e) {
+  console.error('Achievement earned_at backfill failed:', e);
+}
+
 // ============================================================
 // Gambling (office virtual money — see the flowchart + written spec)
 //

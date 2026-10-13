@@ -31,8 +31,6 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<number | null>(null);
   const [editedUrls, setEditedUrls] = useState<Record<number, string>>({});
-  const [recalculating, setRecalculating] = useState(false);
-  const [recalcResults, setRecalcResults] = useState<{ game_name: string; matches_processed: number; achievements_awarded: number }[] | null>(null);
   const [inactiveThreshold, setInactiveThreshold] = useState('60');
   const [savingThreshold, setSavingThreshold] = useState(false);
 
@@ -294,30 +292,6 @@ export default function SettingsPage() {
   function applyPreset(preset: typeof COLOR_PRESETS[0]) {
     setPrimaryColor(preset.primary);
     setAccentColor(preset.accent);
-  }
-
-  async function recalculateAchievements() {
-    setRecalculating(true);
-    setRecalcResults(null);
-    try {
-      const res = await fetch("/api/admin/recalculate-achievements", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({})
-      });
-
-      if (!res.ok) {
-        throw new Error("Failed to recalculate");
-      }
-
-      const data = await res.json();
-      setRecalcResults(data.games);
-    } catch (err) {
-      console.error(err);
-      alert("Failed to recalculate achievements");
-    } finally {
-      setRecalculating(false);
-    }
   }
 
   return (
@@ -795,42 +769,6 @@ export default function SettingsPage() {
             </div>
             {queueMessage && <p className="text-sm text-green-600 mt-3">{queueMessage}</p>}
           </div>
-        </div>
-      </div>
-
-      {/* Achievements Section */}
-      <div className="bg-card rounded-xl shadow-lg overflow-hidden">
-        <div className="px-6 py-4 bg-gradient-to-r from-amber-500 to-orange-500">
-          <h2 className="text-lg font-bold text-white flex items-center gap-2">
-            <span className="text-xl">🏆</span> Achievements
-          </h2>
-          <p className="text-white/85 text-sm mt-1">Recalculate achievement data</p>
-        </div>
-        <div className="p-6">
-          <p className="text-gray-600 mb-4">
-            Recalculate achievements for all historical match data. Useful after editing matches or when new achievements are added.
-          </p>
-          <button
-            onClick={recalculateAchievements}
-            disabled={recalculating}
-            className="px-4 py-2 bg-amber-500 text-white rounded-lg font-medium hover:bg-amber-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {recalculating ? "Recalculating..." : "🔄 Recalculate All Achievements"}
-          </button>
-
-          {recalcResults && (
-            <div className="mt-6 space-y-2">
-              <h3 className="font-semibold text-gray-900">Results:</h3>
-              {recalcResults.map((result) => (
-                <div key={result.game_name} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-                  <span className="font-medium">{formatGameName(result.game_name)}</span>
-                  <span className="text-sm text-gray-600">
-                    {result.matches_processed} matches • {result.achievements_awarded} achievements
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
         </div>
       </div>
     </div>

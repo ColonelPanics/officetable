@@ -582,7 +582,7 @@ export function netHistory(playerId: number | null): { gamble: number | null; da
       END as gamble_id
     FROM bank_transactions bt
     WHERE bt.player_id ${playerId === null ? 'IS NULL' : '= ?'}
-      AND bt.ref_type NOT IN ('topup', 'seed', 'resync')
+      AND bt.ref_type NOT IN ('topup', 'seed', 'resync', 'achievement_payout')
     ORDER BY bt.id
   `).all(...(playerId === null ? [] : [playerId])) as unknown) as {
     id: number; amount: number; created_at: string; gamble_id: number | null;

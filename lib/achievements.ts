@@ -1,5 +1,6 @@
 import db from './db';
-import { resolveSeason } from './seasons';
+import { resolveSeason, toDbDate } from './seasons';
+import { getBank } from './bank';
 
 export interface AchievementContext {
   matchId: number;
@@ -7,6 +8,10 @@ export interface AchievementContext {
   /** Season the match belongs to (= its season ledger). */
   seasonId: number;
   playedAt: Date;
+  /** The match's raw stored 'YYYY-MM-DD HH:MM:SS' (UTC) timestamp. When
+   *  omitted it is derived from playedAt — passing the raw string avoids
+   *  timezone drift in SQL timestamp comparisons. */
+  playedAtDb?: string;
   teams: {
     team: number;
     player_ids: number[];
@@ -29,8 +34,8 @@ export interface AchievementResult {
   metadata?: object;
 }
 
-// (Removed: stale unscoped elo read; rankings come from the season ledger
-// inside checkAchievements below.)
+// (Ranking/board state comes from the ladder reconstruction inside
+// checkAchievements below — see getLadderState.)
 
 // Get player's total games in a game type within the match's season,
 // up to and including a specific match
@@ -58,6 +63,124 @@ function getLowestElo(playerId: number, gameId: number, seasonId: number): numbe
   return result?.lowest ?? null;
 }
 
+// ---------------------------------------------------------------------------
+// Ladder state over history
+//
+// The leaderboard's visibility rules (retired players hidden, inactive
+// players hidden after the inactivity threshold) define who is "on the
+// ladder". Achievement checks must rank against THAT board, and during
+// historical recalculation they must be able to rebuild it for the match's
+// own moment in time, so three dates are derived per player per sport
+// straight from match history:
+//   - first active: the first match they played in that sport (not when the
+//     player row was added);
+//   - inactive: the inactivity threshold (settings, current value) after
+//     their most recent appearance at the moment being evaluated;
+//   - retired: a retired player's final appearance (retirement dates aren't
+//     stored, so the last match ever is the close-enough approximation).
+// ---------------------------------------------------------------------------
+
+/** Minimum matches a season board must have seen before board-position
+ *  achievements (the_best, the_worst, boss_fight) can fire — rankings in a
+ *  sub-10-match context are noise. */
+const RANKING_MIN_BOARD_MATCHES = 10;
+
+/** Moose bucks paid out of the table's pot each time an achievement is
+ *  earned (live recording only — recalculation never re-pays). */
+export const ACHIEVEMENT_PAYOUT = 5;
+
+function inactiveThresholdDays(): number {
+  const row = db.prepare(`SELECT value FROM settings WHERE key = 'inactive_threshold_days'`).get() as
+    | { value: string }
+    | undefined;
+  return row ? parseInt(row.value, 10) : 60;
+}
+
+function addDays(dbDate: string, days: number): string {
+  const d = new Date(`${dbDate.replace(' ', 'T')}Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return toDbDate(d);
+}
+
+export interface LadderPlayerState {
+  playerId: number;
+  /** Current players.status — retirement is only knowable as of "now". */
+  status: 'active' | 'retired';
+  /** First match ever in this sport = when the player first appeared on the ladder. */
+  firstActiveAt: string | null;
+  /** Most recent appearance at or before the evaluated moment. */
+  lastAppearanceAt: string | null;
+  /** When the player counts as inactive: last appearance + threshold (non-retired only). */
+  becomesInactiveAt: string | null;
+  /** Retired players: their final appearance ≈ their retirement point. */
+  retiredAt: string | null;
+  /** Whether the player is on the ladder (visible/ranked) at that moment. */
+  onLadder: boolean;
+}
+
+/**
+ * Per-player ladder state for a sport at a moment in time (db timestamp
+ * string). Recreates the board the leaderboard would show at that moment:
+ *  - a player first appears on the ladder at their first match in the sport;
+ *  - active players drop off inactive-threshold days after their latest
+ *    appearance (evaluated against the given moment, so historical
+ *    recalculation replays the timeline rather than using today's clock);
+ *  - retired players stay on the ladder up to and including their final
+ *    appearance; the inactivity grace does not outlive their retirement.
+ */
+export function getLadderState(gameId: number, atDb: string): Map<number, LadderPlayerState> {
+  const thresholdDays = inactiveThresholdDays();
+
+  const rows = db.prepare(`
+    SELECT
+      mp.player_id,
+      p.status,
+      MIN(m.played_at) as first_at,
+      MAX(m.played_at) as last_at,
+      MAX(CASE WHEN m.played_at <= ? THEN m.played_at END) as last_up_to
+    FROM match_participants mp
+    JOIN matches m ON mp.match_id = m.id
+    JOIN players p ON p.id = mp.player_id
+    WHERE m.game_id = ?
+    GROUP BY mp.player_id
+  `).all(atDb, gameId) as {
+    player_id: number;
+    status: string | null;
+    first_at: string;
+    last_at: string;
+    last_up_to: string | null;
+  }[];
+
+  const state = new Map<number, LadderPlayerState>();
+  for (const row of rows) {
+    const isRetired = row.status === 'retired';
+    const firstActiveAt = row.first_at ?? null;
+    const lastAppearanceAt = row.last_up_to ?? null;
+    let retiredAt: string | null = null;
+    let becomesInactiveAt: string | null = null;
+    let onLadder = false;
+    if (firstActiveAt !== null && firstActiveAt <= atDb) {
+      if (isRetired) {
+        retiredAt = row.last_at;
+        onLadder = retiredAt !== null && atDb <= retiredAt;
+      } else if (lastAppearanceAt !== null) {
+        becomesInactiveAt = addDays(lastAppearanceAt, thresholdDays);
+        onLadder = atDb <= becomesInactiveAt;
+      }
+    }
+    state.set(row.player_id, {
+      playerId: row.player_id,
+      status: isRetired ? 'retired' : 'active',
+      firstActiveAt,
+      lastAppearanceAt,
+      becomesInactiveAt,
+      retiredAt,
+      onLadder,
+    });
+  }
+  return state;
+}
+
 // Check if this is opponent's first game EVER in this game type (all-time
 // definition — season-scoping would let everyone re-farm this achievement
 // at every season opener). Deliberately NOT season-scoped.
@@ -68,27 +191,6 @@ function isFirstGameForOpponent(playerId: number, gameId: number, matchId: numbe
     WHERE mp.player_id = ? AND m.game_id = ? AND m.id < ?
   `).get(playerId, gameId, matchId) as { count: number };
   return result.count === 0;
-}
-
-// Get ranking at a point in time
-function getRankAtTime(gameId: number, playerIds: number[], eloMap: Map<number, number>, playerNameMap: Map<number, string>): Map<number, number> {
-  // Sort players by elo descending, with name as tiebreaker for deterministic ordering
-  const sorted = [...playerIds].sort((a, b) => {
-    const eloA = eloMap.get(a) ?? 0;
-    const eloB = eloMap.get(b) ?? 0;
-    if (eloB !== eloA) return eloB - eloA;
-    // Tiebreaker: alphabetically by name for deterministic ranking
-    const nameA = playerNameMap.get(a) ?? '';
-    const nameB = playerNameMap.get(b) ?? '';
-    return nameA.localeCompare(nameB);
-  });
-
-  const rankings = new Map<number, number>();
-  sorted.forEach((id, index) => {
-    rankings.set(id, index + 1);
-  });
-
-  return rankings;
 }
 
 export function checkAchievements(context: AchievementContext): AchievementResult[] {
@@ -111,24 +213,18 @@ export function checkAchievements(context: AchievementContext): AchievementResul
     }
   }
 
-  // Build elo map for rankings
+  // Match participants' pre-match elo (used by the against-the-odds checks)
   const eloBeforeMap = new Map<number, number>();
-  const eloAfterMap = new Map<number, number>();
   for (const p of participants) {
     eloBeforeMap.set(p.player_id, p.elo_before);
-    eloAfterMap.set(p.player_id, p.elo_after);
   }
 
-  // Get all player IDs in this game for ranking calculation.
-  // Rankings (boss_fight, the_best, the_worst) run on the SEASON ledger —
-  // that's the live competition. Player ratings rows for a season are
-  // current values; participants of this match override with their
-  // pre/post-match season deltas.
-  const allPlayerRatings = db.prepare(`
-    SELECT player_id, elo FROM player_ratings WHERE game_id = ? AND season_id = ?
-  `).all(gameId, seasonId) as { player_id: number; elo: number }[];
-
-  const allPlayerIds = allPlayerRatings.map(r => r.player_id);
+  // Get all players for name lookups (tiebreaker + achievement metadata)
+  const allPlayerNamesBefore = new Map<number, string>();
+  const allNamesStmt = db.prepare('SELECT id, name FROM players');
+  for (const row of allNamesStmt.all() as { id: number; name: string }[]) {
+    allPlayerNamesBefore.set(row.id, row.name);
+  }
 
   // ===== INSTANT DETECTION =====
 
@@ -214,38 +310,72 @@ export function checkAchievements(context: AchievementContext): AchievementResul
     }
   }
 
-  // Boss Fight: Defeat the #1 ranked player
-  // Also prepare rankings before match for The Best / The Worst
+  // Resolve the raw db timestamp once — used for all SQL "as of this match"
+  // comparisons (raw string avoids timezone drift from Date round-trips).
+  const playedAtDb = context.playedAtDb ?? toDbDate(playedAt);
+
+  // Board-position checks rank ONLY the ladder as it stood at this match's
+  // moment — retired and inactive players are off the board (they don't
+  // appear on the leaderboard, so they must not define #1 or last place),
+  // and the values are rebuilt from match_participants history (see the
+  // timeline query below) so recalculation works for any point in the past.
+  const ladderState = getLadderState(gameId, playedAtDb);
+  const onBoard = (playerId: number): boolean => ladderState.get(playerId)?.onLadder ?? false;
+
+  // Board-position achievements only fire once the season's board has
+  // settled: at least 10 matches played in it (this match included).
+  const boardMatches = db.prepare(`
+    SELECT COUNT(*) as count FROM matches
+    WHERE game_id = ? AND season_id = ? AND played_at <= ?
+  `).get(gameId, seasonId, playedAtDb) as { count: number };
+  const boardSettled = boardMatches.count >= RANKING_MIN_BOARD_MATCHES;
+
+  // Sort by elo descending (with player name tiebreaker) into a deterministic
+  // ranking, restricted to players actually on the ladder.
+  const sortRanked = (entries: [number, number][]): [number, number][] =>
+    entries
+      .filter(([id]) => onBoard(id))
+      .sort((a, b) => {
+        if (b[1] !== a[1]) return b[1] - a[1];
+        const nameA = allPlayerNamesBefore.get(a[0]) ?? playerNameMap.get(a[0]) ?? '';
+        const nameB = allPlayerNamesBefore.get(b[0]) ?? playerNameMap.get(b[0]) ?? '';
+        return nameA.localeCompare(nameB);
+      });
+
+  // Rebuild the season-ledger ladder as of this match's moment: each player
+  // owns the post-elo of their latest season match at or before now. For the
+  // match's own participants the pre/post elo passed by the caller (which
+  // knows this match's deltas in both leddgers) takes precedence, so live
+  // recording and historical recalculation see exactly the same board.
+  const ladderTimeline = db.prepare(`
+    SELECT player_id, elo_after FROM (
+      SELECT
+        mp.player_id,
+        mp.elo_after,
+        ROW_NUMBER() OVER (
+          PARTITION BY mp.player_id
+          ORDER BY m.played_at DESC, m.id DESC
+        ) as rn
+      FROM match_participants mp
+      JOIN matches m ON mp.match_id = m.id
+      WHERE m.game_id = ? AND m.season_id = ? AND m.played_at <= ? AND m.id != ?
+    )
+    WHERE rn = 1
+  `).all(gameId, seasonId, playedAtDb, matchId) as { player_id: number; elo_after: number }[];
+
   const allEloBefore = new Map<number, number>();
-  for (const r of allPlayerRatings) {
-    allEloBefore.set(r.player_id, r.elo);
+  for (const row of ladderTimeline) {
+    allEloBefore.set(row.player_id, row.elo_after);
   }
   for (const p of participants) {
     allEloBefore.set(p.player_id, p.elo_before);
   }
 
-  // Sort by elo descending (with player name tiebreaker) to get rankings before the match
-  const allPlayerNamesBefore = new Map<number, string>();
-  const allNamesStmt = db.prepare('SELECT id, name FROM players');
-  for (const row of allNamesStmt.all() as { id: number; name: string }[]) {
-    allPlayerNamesBefore.set(row.id, row.name);
-  }
-  const sortedBefore = [...allEloBefore.entries()].sort((a, b) => {
-    if (b[1] !== a[1]) return b[1] - a[1];
-    const nameA = allPlayerNamesBefore.get(a[0]) ?? '';
-    const nameB = allPlayerNamesBefore.get(b[0]) ?? '';
-    return nameA.localeCompare(nameB);
-  });
+  const sortedBefore = sortRanked([...allEloBefore.entries()]);
   const numberOneBefore = sortedBefore[0]?.[0];
   const lastBefore = sortedBefore[sortedBefore.length - 1]?.[0];
 
-  // Create rank map for before
-  const rankBefore = new Map<number, number>();
-  sortedBefore.forEach((entry, index) => {
-    rankBefore.set(entry[0], index + 1);
-  });
-
-  if (!isDraw) {
+  if (!isDraw && boardSettled) {
     for (const winnerId of winnerIds) {
       for (const loserId of loserIds) {
         if (loserId === numberOneBefore && winnerId !== numberOneBefore) {
@@ -261,31 +391,19 @@ export function checkAchievements(context: AchievementContext): AchievementResul
   }
 
   // The Best / The Worst: Only if rank changes into #1 or last position
-  if (!isDraw) {
-    // Calculate rankings after match
+  if (!isDraw && boardSettled) {
+    // Calculate the after-match board (same timeline with this match applied)
     const allEloAfter = new Map<number, number>();
-    for (const r of allPlayerRatings) {
-      allEloAfter.set(r.player_id, r.elo);
+    for (const row of ladderTimeline) {
+      allEloAfter.set(row.player_id, row.elo_after);
     }
-    // Update with participants' after-elo
     for (const p of participants) {
       allEloAfter.set(p.player_id, p.elo_after);
     }
 
-    const sortedAfter = [...allEloAfter.entries()].sort((a, b) => {
-      if (b[1] !== a[1]) return b[1] - a[1];
-      const nameA = allPlayerNamesBefore.get(a[0]) ?? '';
-      const nameB = allPlayerNamesBefore.get(b[0]) ?? '';
-      return nameA.localeCompare(nameB);
-    });
+    const sortedAfter = sortRanked([...allEloAfter.entries()]);
     const numberOneAfter = sortedAfter[0]?.[0];
     const lastAfter = sortedAfter[sortedAfter.length - 1]?.[0];
-
-    // Create rank map for after
-    const rankAfter = new Map<number, number>();
-    sortedAfter.forEach((entry, index) => {
-      rankAfter.set(entry[0], index + 1);
-    });
 
     // The Best: Only if player is now #1 AND wasn't #1 before
     for (const winnerId of winnerIds) {
@@ -593,26 +711,71 @@ export function checkAchievements(context: AchievementContext): AchievementResul
   return results;
 }
 
-export function saveAchievements(results: AchievementResult[], gameId: number, seasonId: number): void {
+export interface SaveAchievementsOptions {
+  /** Pay each earner a small achievement payout out of the table's pot.
+   *  Only for LIVE recording — recalculation/replay must never re-pay
+   *  (players would farm the pot by triggering recalcs). */
+  payFromPot?: boolean;
+}
+
+export function saveAchievements(results: AchievementResult[], gameId: number, seasonId: number, options: SaveAchievementsOptions = {}): Map<number, number> {
   // Re-earnable per season: rows are unique per (player, game, achievement, season)
   // for the "awarded-once" achievements, which is enforced by the per-season
   // dedup checks inside checkAchievements. Multiple-earn achievements (like
   // fresh_blood) legitimately produce multiple rows.
   const insertStmt = db.prepare(`
-    INSERT INTO player_achievements (player_id, game_id, achievement_id, match_id, metadata, season_id)
-    VALUES (?, ?, (SELECT id FROM achievements WHERE name = ?), ?, ?, ?)
+    INSERT INTO player_achievements (player_id, game_id, achievement_id, match_id, metadata, season_id, earned_at)
+    VALUES (?, ?, (SELECT id FROM achievements WHERE name = ?), ?, ?, ?, ?)
   `);
+  const playedAtStmt = db.prepare('SELECT played_at FROM matches WHERE id = ?');
 
   for (const result of results) {
+    // The earned date is the MATCH's timestamp — when the achievement was
+    // actually earned in play, NOT when the check ran (recalculated
+    // achievements keep their original earn date, and don't all pile onto
+    // the day the ladder went live).
+    const playedAtRow = playedAtStmt.get(result.matchId) as { played_at: string } | undefined;
     insertStmt.run(
       result.playerId,
       gameId,
       result.achievementName,
       result.matchId,
       result.metadata ? JSON.stringify(result.metadata) : null,
-      seasonId
+      seasonId,
+      playedAtRow?.played_at ?? toDbDate(new Date())
     );
   }
+
+  if (options.payFromPot) {
+    return payAchievementPayouts(results);
+  }
+  return new Map();
+}
+
+/**
+ * Achievement payout: each freshly earned achievement pays a small amount of
+ * moose bucks out of the table's pot to its earner — playing well literally
+ * pays. Nothing is paid when the pot has no cash (the payout never overdrafts
+ * the pot). Returns each earner's total paid (players who got nothing are
+ * simply absent).
+ */
+function payAchievementPayouts(results: AchievementResult[]): Map<number, number> {
+  const bank = getBank();
+  const paid = new Map<number, number>();
+  for (const result of results) {
+    const pot = bank.getHouseBalance();
+    if (pot < ACHIEVEMENT_PAYOUT) return paid; // table's pot has no cash left — stop paying
+    const memo = `achievement payout — ${result.achievementName.replace(/_/g, ' ')}`;
+    // Pot pays player: house debit (stays local — reconciled against the
+    // bank's real pot by the resync) + player credit (mirrored to the central
+    // bank as a service 'win' transfer by the bank_sync outbox).
+    db.transaction(() => {
+      bank.debit(null, ACHIEVEMENT_PAYOUT, { type: 'achievement_payout', id: result.matchId, memo });
+      bank.credit(result.playerId, ACHIEVEMENT_PAYOUT, { type: 'achievement_payout', id: result.matchId, memo });
+    })();
+    paid.set(result.playerId, (paid.get(result.playerId) ?? 0) + ACHIEVEMENT_PAYOUT);
+  }
+  return paid;
 }
 
 export function deleteAchievementsForMatch(matchId: number): void {
@@ -738,6 +901,7 @@ export function recalculateAchievementsForGame(gameId: number, seasonId?: number
       gameId,
       seasonId: matchSeasonId,
       playedAt,
+      playedAtDb: match.played_at,
       teams,
       participants,
       playerNameMap
