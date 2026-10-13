@@ -20,7 +20,7 @@ export default function NewChallengePage() {
   const [broadcast, setBroadcast] = useState(false);
   const [entryFee, setEntryFee] = useState(50);
   const [side, setSide] = useState<'red' | 'blue'>('red');
-  const [payoutLine, setPayoutLine] = useState('true_even');
+  const [payoutLine, setPayoutLine] = useState('elo_even');
   const [specialRules, setSpecialRules] = useState('');
   const [scheduledLocal, setScheduledLocal] = useState(() => {
     // Default: one hour from now, local ISO datetime-local format
@@ -111,8 +111,8 @@ export default function NewChallengePage() {
   // have their own payout rules).
   const total = selectedGame?.score_value ?? 10;
   const payoutLines: { value: string; label: string }[] = [
-    { value: 'true_even', label: "Evens on a draw (5-5)" },
     { value: 'elo_even', label: ladder ? `Evens on the bookie's line (${ladder.predictedLine})` : "Evens on the bookie's predicted line" },
+    { value: 'true_even', label: "Evens on a draw (5-5)" },
   ];
   for (let red = 1; red <= 9; red++) {
     const blue = total - red;

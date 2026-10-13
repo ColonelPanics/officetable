@@ -45,7 +45,7 @@ export default function ChallengeDetailPage() {
   const [counterFee, setCounterFee] = useState(50);
   const [counterTime, setCounterTime] = useState('');
   const [counterSide, setCounterSide] = useState<'red' | 'blue'>('red');
-  const [counterLine, setCounterLine] = useState('true_even');
+  const [counterLine, setCounterLine] = useState('elo_even');
   const [counterRules, setCounterRules] = useState('');
 
   const load = useCallback(async () => {
@@ -60,7 +60,7 @@ export default function ChallengeDetailPage() {
         const pad = (n: number) => String(n).padStart(2, '0');
         setCounterTime(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`);
         setCounterSide(last.red_player_id === (data.challenge.challenger_id) ? 'red' : 'blue');
-      setCounterLine(data.challenge.payout_line ?? 'true_even');
+      setCounterLine(data.challenge.payout_line ?? 'elo_even');
       setCounterRules(data.challenge.special_rules ?? '');
       }
     }
@@ -115,8 +115,8 @@ export default function ChallengeDetailPage() {
     : challenge.red_player_id === challenge.challenger_id ? challenge.challenger_name : (challenge.opponent_name ?? 'first to accept');
   const gameTotal = games.find(g => g.id === challenge.game_id)?.score_value ?? null;
   const counterLines: { value: string; label: string }[] = [
-    { value: 'true_even', label: 'Evens on a draw (5-5)' },
     { value: 'elo_even', label: "Evens on the bookie's predicted line" },
+    { value: 'true_even', label: 'Evens on a draw (5-5)' },
   ];
   if (gameTotal != null) {
     for (let red = 1; red <= 9; red++) {

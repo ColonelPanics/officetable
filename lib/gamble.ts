@@ -57,13 +57,13 @@ export const GAMBLE_RULES = {
 const BASE_POT_MINIMUM = 100;
 
 /**
- * Payout lines (stored format): 'true_even' = a literal draw (5-5);
- * 'elo_even' = the bookie's frozen predicted line; otherwise a custom
+ * Payout lines (stored format): 'elo_even' = the bookie's frozen predicted
+ * line (the default); 'true_even' = a literal draw (5-5); otherwise a custom
  * 'R-B' scoreline with R+B = the game total and both halves 1-9 —
  * 10-0 / 0-10 are deliberately not choosable as an even line.
  */
 export function parsePayoutLine(value: unknown, total: number): string | null {
-  if (value === undefined) return 'true_even';
+  if (value === undefined) return 'elo_even';
   if (typeof value !== 'string') return null;
   if (value === 'true_even' || value === 'elo_even') return value;
   const m = /^([0-9]+)-([0-9]+)$/.exec(value);
