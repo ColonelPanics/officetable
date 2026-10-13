@@ -37,6 +37,7 @@ const REF_LABEL: Record<string, string> = {
   pot_house_cut: 'House cut',
   house_loss: 'House payout over-cap',
   topup: 'Moose bucks top-up',
+  resync: 'Resynced with the bookie',
   seed: 'Starting moose',
   refund: 'Refund',
 };

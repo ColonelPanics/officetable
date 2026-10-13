@@ -528,7 +528,7 @@ export function netHistory(playerId: number | null): { gamble: number | null; da
       END as gamble_id
     FROM bank_transactions bt
     WHERE bt.player_id ${playerId === null ? 'IS NULL' : '= ?'}
-      AND bt.ref_type NOT IN ('topup', 'seed')
+      AND bt.ref_type NOT IN ('topup', 'seed', 'resync')
     ORDER BY bt.id
   `).all(...(playerId === null ? [] : [playerId])) as unknown) as {
     id: number; amount: number; created_at: string; gamble_id: number | null;
@@ -570,13 +570,17 @@ export function netHistory(playerId: number | null): { gamble: number | null; da
 
 /**
  * "Bank is the truth": once every movement has drained, snap the local
- * projections onto the real bank-side balances — it absorbs the bank's 2%
- * receipt skim and any spending done outside this site. The snap is
- * DOWNWARD-ONLY for players (see comment below). The house pot
- * (bank_house) is engine bookkeeping and stays local.
+ * projections onto the real bank-side balances in BOTH DIRECTIONS. Other
+ * apps (casino, horse races, ...) spend the same central-bank currency, so
+ * the balance shown here is a bookie fact, never a site speculation — a
+ * one-way (the old down-only) snap guarantees drift the moment anything
+ * outside this site moves money. Every snap is ledgered as a 'resync' row
+ * (excluded from gamble P&L like topup/seed) so the bank page explains its
+ * own balance; sub-EPS dust snaps silently. The house pot (bank_house) is
+ * engine bookkeeping — snapped both ways as before, also ledgered.
  */
 export async function reconcileAlcesBalances(): Promise<void> {
-  if (!alcesMirrorEnabled()) return;
+  if (!alcesMirrorEnabled() || draining) return;
   const backlog = bankSyncBacklog();
   if (backlog.pending > 0 || backlog.failed > 0) return;
   let balances: Map<string, number>;
@@ -585,31 +589,86 @@ export async function reconcileAlcesBalances(): Promise<void> {
   } catch {
     return; // unreachable right now — try again on the next drain
   }
+  applyBalanceResync(balances);
+}
+
+/** Apply a bookie-truth balance snapshot to the local projections (players
+ *  and house). Exported for tests; reconcileAlcesBalances is its only
+ *  production caller. Every non-dust delta is ledgered as a 'resync' row
+ *  (player_id NULL for the house), NOT queued to bank_sync — these rows
+ *  describe movements that already exist centrally. */
+export function applyBalanceResync(balances: Map<string, number>): void {
   const rows = db.prepare(`
     SELECT player_id, balance, bank_username FROM bank_accounts
     WHERE bank_username IS NOT NULL
   `).all() as { player_id: number; balance: number; bank_username: string }[];
-  const update = db.prepare(`
-    UPDATE bank_accounts SET balance = ?, updated_at = CURRENT_TIMESTAMP WHERE player_id = ?
-  `);
-  // Downward-only snap: absorb the bank's receipt skim and any spending done
-  // outside the site, but never import bank-side money the local ledger
-  // doesn't know about. Otherwise a fresh mint (registering a bank account
-  // mints 500) could be linked, re-linked and farmed into free site funds —
-  // the bookie, not registration freebies, must control site balances.
   for (const row of rows) {
     const truth = balances.get(row.bank_username);
-    if (truth !== undefined && truth < row.balance - 0.004) {
-      update.run(truth, row.player_id);
+    if (truth === undefined) continue;
+    const delta = Math.round((truth - row.balance) * 100) / 100;
+    if (Math.abs(delta) < BALANCE_EPS) {
+      if (delta !== 0) {
+        // Dust — snap silently, no ledger row.
+        db.prepare(`UPDATE bank_accounts SET balance = ?, updated_at = CURRENT_TIMESTAMP WHERE player_id = ?`)
+          .run(truth, row.player_id);
+      }
+      continue;
     }
+    db.transaction(() => {
+      // Direct ledger write, deliberately NOT writeLedger: that would queue a
+      // bank_sync row and the drainer would re-send this delta to the central
+      // bank — but these rows only DESCRIBE movements that already happened
+      // there (other apps, receipt skim, manual bookie true-ups).
+      db.prepare(`
+        INSERT INTO bank_transactions (ref_type, ref_id, player_id, amount, memo)
+        VALUES ('resync', NULL, ?, ?, ?)
+      `).run(row.player_id, delta, `resynced to bookie truth (δ ${delta > 0 ? '+' : ''}${delta.toFixed(2)}) — movements outside this site (other apps, receipt skim, manual bookie true-ups)`);
+      db.prepare(`UPDATE bank_accounts SET balance = ?, updated_at = CURRENT_TIMESTAMP WHERE player_id = ?`)
+        .run(truth, row.player_id);
+    })();
   }
   // The house pot includes everything players actually paid in — entry fees,
-  // stakes, and the house user's own mint on the central bank. With the queue
-  // clear, snap bank_house onto that central truth so payout/bet caps use the
-  // REAL bank holdings (a fresh reset otherwise shows a 0 pot and blocks bets).
-  const houseUser = alcesConfig().houseUser;
+  // stakes, and the house user's own mint on the central bank. Snap it onto
+  // that central truth so payout/bet caps use the REAL bank holdings (a
+  // fresh reset otherwise shows a 0 pot and blocks bets).
+  // Cheap secret-free house-user read: resync never needs to decrypt bank
+  // credentials (it only reads balances) — pulling the full alcesConfig()
+  // would make the snap fail on machines without the encryption key.
+  const houseUserSetting = db.prepare(`SELECT value FROM settings WHERE key = 'alces_house_user'`).get() as { value: string } | undefined;
+  const houseUser = process.env.ALCES_HOUSE_USER || houseUserSetting?.value || 'officetablehouse';
   const houseTruth = balances.get(houseUser);
-  if (houseTruth !== undefined && Math.abs(houseTruth - sqliteBank.getHouseBalance()) > 0.004) {
-    db.prepare(`UPDATE bank_house SET balance = ? WHERE id = 1`).run(houseTruth);
+  if (houseTruth === undefined) return;
+  const houseDelta = Math.round((houseTruth - sqliteBank.getHouseBalance()) * 100) / 100;
+  if (Math.abs(houseDelta) < BALANCE_EPS) {
+    if (houseDelta !== 0) {
+      db.prepare(`UPDATE bank_house SET balance = ? WHERE id = 1`).run(houseTruth);
+    }
+    return;
   }
+  db.transaction(() => {
+    // Direct ledger write — no bank_sync (see the player-path note above).
+    db.prepare(`
+      INSERT INTO bank_transactions (ref_type, ref_id, player_id, amount, memo)
+      VALUES ('resync', NULL, NULL, ?, ?)
+    `).run(houseDelta, `house pot resynced to bookie truth (δ ${houseDelta > 0 ? '+' : ''}${houseDelta.toFixed(2)})`);
+    db.prepare(`UPDATE bank_house SET balance = ? WHERE id = 1`).run(houseTruth);
+  })();
+}
+
+/** In-memory throttle for read-path auto-reconcile (see autoReconcileBalances). */
+let lastAutoReconcileAt = 0;
+
+/** Fire-and-forget truth sync for read paths that DISPLAY balances (bank
+ *  page, leaderboard). Money-moving paths reconcile immediately via the
+ *  drain; reads only resync on a cooldown (settings key
+ *  'balance_resync_minutes', default 5) so page views can't hammer the
+ *  bookie's API. Errors are silently deferred to the next eligible call. */
+export function autoReconcileBalances(): void {
+  if (!alcesMirrorEnabled() || draining) return;
+  const minutesStr = (db.prepare(`SELECT value FROM settings WHERE key = 'balance_resync_minutes'`).get() as { value: string } | undefined)?.value;
+  const minutes = Number(minutesStr) || 5;
+  const now = Date.now();
+  if (now - lastAutoReconcileAt < minutes * 60_000) return;
+  lastAutoReconcileAt = now;
+  void reconcileAlcesBalances().catch(e => console.error('auto balance resync:', e));
 }

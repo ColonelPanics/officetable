@@ -69,9 +69,9 @@ export async function GET(request: NextRequest) {
     const s = db.prepare(`
       SELECT COALESCE(bal.balance, ${seedBalance()}) as balance,
         COALESCE((SELECT SUM(amount) FROM bank_transactions
-          WHERE player_id = @pid AND ref_type NOT IN ('topup', 'seed')), 0) as net,
+          WHERE player_id = @pid AND ref_type NOT IN ('topup', 'seed', 'resync')), 0) as net,
         COALESCE((SELECT SUM(-amount) FROM bank_transactions
-          WHERE player_id = @pid AND amount < 0 AND ref_type NOT IN ('topup', 'seed')), 0) as wagered,
+          WHERE player_id = @pid AND amount < 0 AND ref_type NOT IN ('topup', 'seed', 'resync')), 0) as wagered,
         COALESCE((SELECT SUM(status = 'won') FROM bets WHERE bettor_id = @pid), 0) as bets_won,
         COALESCE((SELECT SUM(status = 'lost') FROM bets WHERE bettor_id = @pid), 0) as bets_lost,
         COALESCE((SELECT COUNT(*) FROM gamble_matches gm

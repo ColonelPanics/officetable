@@ -23,6 +23,7 @@
  * whenever the bookie notices the mistake.
  */
 
+import db from '../lib/db';
 import {
   getGambleMatch,
   getBets,
@@ -43,7 +44,26 @@ function main(): void {
 
   const gm = getGambleMatch(gambleMatchId);
   if (!gm) {
+    // Common slip: passing the RECORDED office match id (dangling after a
+    // match-history edit) instead of the gamble match id. Catch it and
+    // point at the gamble that references it.
+    const byRecorded = db.prepare(
+      `SELECT id FROM gamble_matches WHERE match_id = ?`
+    ).get(gambleMatchId) as { id: number } | undefined;
+    if (byRecorded) {
+      console.error(`${gambleMatchId} is the RECORDED match id, not a gamble id — gamble #${byRecorded.id} points at it.`);
+      console.error(`Run: npx tsx scripts/correct-gamble-score.ts ${byRecorded.id} <red> <blue>`);
+      process.exit(1);
+    }
+    // A deleted match id that no gamble references any more (already
+    // re-pointed): suggest the gamble that was just corrected.
+    const corrected = db.prepare(
+      `SELECT id FROM gamble_matches WHERE corrected_at IS NOT NULL AND match_id > ? ORDER BY id DESC LIMIT 1`
+    ).all(gambleMatchId - 10) as { id: number }[];
     console.error(`Gamble match ${gambleMatchId} not found.`);
+    if (corrected.length) {
+      console.error(`If you meant the gamble whose settle was re-created around here, recent candidates: ${corrected.map(c => `#${c.id}`).join(', ')} (check gamble_matches.match_id).`);
+    }
     process.exit(1);
   }
   if (gm.status !== 'settled' || !gm.match_id) {

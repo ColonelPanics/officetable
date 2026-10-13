@@ -6,7 +6,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import db from '@/lib/db';
-import { getBank, seedBalance, alcesMirrorEnabled, netHistory } from '@/lib/bank';
+import { getBank, seedBalance, alcesMirrorEnabled, netHistory, autoReconcileBalances } from '@/lib/bank';
 import { gambleErrorResponse } from '@/lib/gambleApi';
 
 interface GamblerRow {
@@ -42,7 +42,7 @@ const SQL = `
            SUM(amount) as net,
            SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END) as wagered
     FROM bank_transactions
-    WHERE ref_type NOT IN ('topup', 'seed')
+    WHERE ref_type NOT IN ('topup', 'seed', 'resync')
     GROUP BY player_id
   ) pl ON pl.player_id = p.id
   LEFT JOIN (
@@ -64,6 +64,9 @@ const SQL = `
 
 export async function GET(request: NextRequest) {
   try {
+    // Throttled truth sync (default 5 min) — the leaderboard's balance column
+    // must track the bookie, especially with other apps moving the same money.
+    autoReconcileBalances();
     const { searchParams } = new URL(request.url);
     const limitRaw = parseInt(searchParams.get('limit') ?? '', 10);
 
@@ -93,7 +96,7 @@ export async function GET(request: NextRequest) {
     // excluding the opening float ('topup'/'seed' are free money, not P&L).
     const house = db.prepare(`
       SELECT COALESCE(SUM(amount), 0) as net FROM bank_transactions
-      WHERE player_id IS NULL AND ref_type NOT IN ('topup', 'seed')`)
+      WHERE player_id IS NULL AND ref_type NOT IN ('topup', 'seed', 'resync')`)
       .get() as { net: number };
 
     const bank = getBank();
