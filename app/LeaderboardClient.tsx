@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useSelectedGame } from "@/lib/hooks/useSelectedGame";
 import { PlayerAvatar } from "@/components/PlayerAvatar";
 import { SeasonalDecor } from "@/components/SeasonalDecor";
+import { TrendSparkline } from "@/components/TrendSparkline";
 import type { LeaderboardEntry } from "@/lib/types";
 import type { SeasonalTheme } from "@/lib/seasonalTheme";
 import { NO_SEASONAL_THEME } from "@/lib/seasonalTheme";
@@ -85,50 +86,6 @@ function formatCountdown(target: Date, now: Date): string {
   if (days >= 1) return `${days}d ${hours}h`;
   if (hours >= 1) return `${hours}h ${minutes}m`;
   return `${Math.max(minutes, 1)}m`;
-}
-
-function TrendSparkline({ deltas }: { deltas: number[] }) {
-  if (deltas.length === 0) {
-    return <span className="text-gray-300">—</span>;
-  }
-
-  const netChange = deltas.reduce((sum, d) => sum + d, 0);
-  const isPositive = netChange >= 0;
-  const color = isPositive ? '#16a34a' : '#dc2626';
-
-  const cumulative: number[] = [];
-  let running = 0;
-  for (const d of deltas) {
-    running += d;
-    cumulative.push(running);
-  }
-
-  const min = Math.min(...cumulative, 0);
-  const max = Math.max(...cumulative, 0);
-  const range = Math.max(max - min, 1);
-
-  const width = 60;
-  const height = 20;
-  const padding = 2;
-
-  const points = cumulative.map((val, i) => {
-    const x = padding + (i / Math.max(cumulative.length - 1, 1)) * (width - 2 * padding);
-    const y = padding + (1 - (val - min) / range) * (height - 2 * padding);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(' ');
-
-  return (
-    <svg width={width} height={height} className="inline-block align-middle">
-      <polyline
-        points={points}
-        fill="none"
-        stroke={color}
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
 }
 
 interface EmptyStateProps {

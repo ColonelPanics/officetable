@@ -165,6 +165,16 @@ export function Nav() {
               📊 Leaderboard
             </Link>
             <Link
+              href="/ladder-history"
+              className={`px-4 py-2 text-sm font-medium rounded-lg transition-all ${
+                pathname?.startsWith('/ladder-history')
+                  ? 'text-primary bg-gray-100'
+                  : 'text-gray-600 hover:text-primary hover:bg-gray-100'
+              }`}
+            >
+              🕰️ Time Machine
+            </Link>
+            <Link
               href="/players"
               className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-primary hover:bg-gray-100 rounded-lg transition-all"
             >
