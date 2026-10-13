@@ -525,11 +525,14 @@ function recheckAchievementsForReplay(
 /**
  * Correct a match result and replay all subsequent matches through both
  * ledgers. Ratings are recalculated from the corrected match forward.
+ * Returns the old→new match id map: correcting DELETES and re-creates match
+ * rows (fresh ids), so callers that link other tables by match_id must
+ * re-point them.
  */
 export function correctMatch(
   matchId: number,
   newTeams: { team: number; player_ids: number[]; score: number }[]
-): void {
+): Map<number, number> {
   const originalMatch = db.prepare(`
     SELECT * FROM matches WHERE id = ?
   `).get(matchId) as { id: number; game_id: number; played_at: string; notes: string | null; season_id: number } | undefined;
@@ -623,6 +626,7 @@ export function correctMatch(
     const now = new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
     db.prepare(`UPDATE matches SET is_edited = 1, edited_at = ? WHERE id = ?`).run(now, correctedMatchNewId);
   }
+  return oldToNewMatchIds;
 }
 
 /**

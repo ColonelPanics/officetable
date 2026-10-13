@@ -6,6 +6,7 @@ import db from '@/lib/db';
 import {
   getGambleMatch, getBets, getBetPool, deriveStatus, syncStatuses,
 } from '@/lib/gamble';
+import { isWithinEditWindow } from '@/lib/elo';
 import { gambleErrorResponse } from '@/lib/gambleApi';
 
 export async function GET(
@@ -38,13 +39,23 @@ export async function GET(
     // recorded. team 0 = red, team 1 = blue (the settle path guarantees this
     // orientation). Returned unoriented as {red, blue} for the UI.
     let finalScore: { red: number; blue: number } | null = null;
+    let recordedPlayedAt: string | null = null;
     if (gm.status === 'settled' && gm.match_id) {
       const parts = db.prepare(`
         SELECT team, score FROM match_participants
         WHERE match_id = ? AND team IN (0, 1) ORDER BY team`)
         .all(gm.match_id) as { team: number; score: number }[];
       if (parts.length === 2) finalScore = { red: parts[0].score, blue: parts[1].score };
+      const recorded = db.prepare(`SELECT played_at FROM matches WHERE id = ?`)
+        .get(gm.match_id) as { played_at: string } | undefined;
+      recordedPlayedAt = recorded?.played_at ?? null;
     }
+
+    // Correction offer: participants may fix a wrong score within the same
+    // 24-hour edit window office matches use (money true-ups with the bookie).
+    const canCorrect = isParticipant && gm.status === 'settled'
+      && Boolean(recordedPlayedAt) && finalScore !== null
+      && isWithinEditWindow(recordedPlayedAt!);
 
     return NextResponse.json({
       match: gm,
@@ -58,6 +69,7 @@ export async function GET(
       is_participant: isParticipant,
       can_bet: derived.status === 'open' && !isParticipant,
       can_score: isParticipant && (derived.status === 'awaiting_score' || derived.status === 'bets_closed'),
+      can_correct: canCorrect,
       can_cancel: isParticipant && (derived.status === 'open' || derived.status === 'bets_closed' || derived.status === 'awaiting_score'),
     });
   } catch (error) {

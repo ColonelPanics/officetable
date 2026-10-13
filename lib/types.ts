@@ -305,6 +305,31 @@ export interface SettleSummary {
   playerEntry: { playerId: number; fee: number; returned: number }[];
 }
 
+/** Result of correcting the final score of a settled gamble (see
+ *  correctGambleScore). betAdjustments show the re-derived won/lost + payout
+ *  per bet — the payout values are the corrected book, NOT bank movements
+ *  (money true-ups happen with the bookie out-of-band). */
+export interface CorrectScoreSummary {
+  gambleMatchId: number;
+  /** The match row the original settle recorded (deleted by the Elo replay). */
+  previousMatchId: number;
+  /** The fresh match row the correction re-created (same scores' Elo replay). */
+  matchId: number | null;
+  previousScore: { red: number | null; blue: number | null };
+  finalScore: { red: number; blue: number };
+  betsAdjusted: number;
+  betAdjustments: {
+    bettor_id: number;
+    bettor_name: string;
+    pick: string;
+    stake: number;
+    was: { status: string; payout: number };
+    now: { status: 'won' | 'lost'; payout: number };
+    changed: boolean;
+  }[];
+  note: string;
+}
+
 export interface BankTransaction {
   id: number;
   ref_type: string;

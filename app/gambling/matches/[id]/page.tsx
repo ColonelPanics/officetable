@@ -24,6 +24,7 @@ interface Detail {
   can_bet: boolean;
   can_score: boolean;
   can_cancel: boolean;
+  can_correct: boolean;
 }
 
 interface BalanceInfo {
@@ -232,6 +233,12 @@ export default function GambleMatchPage() {
       {/* Settled view */}
       {(status === 'settled' || status === 'cancelled') && (
         <SettledView gm={gm} bets={detail.bets} summary={summary} finalScore={detail.final_score} />
+      )}
+
+      {/* Wrong score? Participants can correct a settled gamble within 24 hours
+          — re-runs the recorded match and re-marks the bets; money with the bookie. */}
+      {status === 'settled' && detail.can_correct && (
+        <CorrectScorePanel gm={gm} finalScore={detail.final_score} onDone={load} />
       )}
 
       {status !== 'settled' && status !== 'cancelled' && (
@@ -472,6 +479,88 @@ function SettledView({ gm, bets, summary, finalScore }: { gm: GambleMatch; bets:
 
       {refunded.length > 0 && (
         <div className="text-sm text-gray-500">{refunded.length} bets were refunded before the close.</div>
+      )}
+    </div>
+  );
+}
+/** Post-settlement score correction (24h window, participants only):
+ *  re-runs the recorded match through the Elo replay and re-marks every bet's
+ *  won/lost + payout. The bank is deliberately untouched — money true-ups are
+ *  settled with the bookie directly, out-of-band. */
+function CorrectScorePanel({ gm, finalScore, onDone }: {
+  gm: GambleMatch;
+  finalScore: { red: number; blue: number } | null;
+  onDone: () => void;
+}) {
+  const [red, setRed] = useState(finalScore?.red ?? 0);
+  const [blue, setBlue] = useState(finalScore?.blue ?? 0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  const { me } = useMe();
+
+  async function correct() {
+    if (!me) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/gambling/matches/${gm.id}/correct`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ player_id: me.id, red_score: red, blue_score: blue }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        setError(body.error ?? 'Correction failed');
+        return;
+      }
+      setDone(true);
+      onDone();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-amber-300 bg-amber-50 p-5">
+      <div className="text-sm font-semibold text-amber-800 mb-2">Wrong score recorded?</div>
+      {done ? (
+        <p className="text-sm text-amber-800">
+          Corrected — the match has been re-recorded and the bets re-marked. Any pays/repays on the money go through the bookie.
+        </p>
+      ) : (
+        <>
+          <div className="flex items-center gap-2 mb-3">
+            <input
+              type="number" min={0} max={gm.outcome_total} value={red}
+              onChange={e => setRed(parseInt(e.target.value, 10) || 0)}
+              className="w-16 px-2 py-1.5 rounded-lg border border-gray-200 bg-background text-center text-red-600 font-bold"
+              aria-label="Corrected red score"
+            />
+            <span className="text-gray-400">–</span>
+            <input
+              type="number" min={0} max={gm.outcome_total} value={blue}
+              onChange={e => setBlue(parseInt(e.target.value, 10) || 0)}
+              className="w-16 px-2 py-1.5 rounded-lg border border-gray-200 bg-background text-center text-blue-600 font-bold"
+              aria-label="Corrected blue score"
+            />
+            <span className={`text-xs ${red + blue === gm.outcome_total ? 'text-green-600' : 'text-red-500'}`}>
+              = {red + blue} / {gm.outcome_total}
+            </span>
+          </div>
+          {error && <p className="text-xs text-red-700 mb-2">{error}</p>}
+          <button
+            onClick={correct}
+            disabled={busy || red + blue !== gm.outcome_total || (red === finalScore?.red && blue === finalScore?.blue)}
+            className="font-semibold bg-amber-600 text-white rounded-lg px-4 py-2 hover:bg-amber-700 disabled:opacity-40 text-sm"
+          >
+            Correct the final score
+          </button>
+          <p className="text-[11px] text-amber-700 mt-2">
+            Replays the recorded match (Elo recalculated from here forward) and re-marks every bet result — banking
+            true-ups are settled with the bookie. Available for 24 hours after the settle.
+          </p>
+        </>
       )}
     </div>
   );

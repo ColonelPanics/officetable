@@ -90,3 +90,6 @@ STATUS_BY_CODE['bank_not_linked'] = 403;
 STATUS_BY_CODE['bet_exceeds_pot'] = 409;
 STATUS_BY_CODE['not_logged_in'] = 403;
 STATUS_BY_CODE['forbidden'] = 403;
+STATUS_BY_CODE['not_settled'] = 409;
+STATUS_BY_CODE['recorded_match_missing'] = 409;
+STATUS_BY_CODE['score_mismatch'] = 409;

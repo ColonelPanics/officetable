@@ -7,7 +7,7 @@
 // counter can never strand a fee.
 
 import db from './db';
-import { processMatch } from './elo';
+import { processMatch, correctMatch } from './elo';
 import { getBank, assertBankLinked, kickBankSync, alcesMirrorEnabled } from './bank';
 import { computeOddsLadder } from './gambleOdds';
 import { announceBetsClosed, announceCancelled } from './gambleNotifications';
@@ -20,6 +20,7 @@ import type {
   GambleMatchStatus,
   OddsLadder,
   ScoreOutcome,
+  CorrectScoreSummary,
   SettleSummary,
 } from './types';
 
@@ -843,6 +844,172 @@ export function settleGambleMatch(
   // Payouts/fees moved — push them toward the central bank (bounded drain).
   kickBankSync();
   return summary;
+}
+
+
+// ---------------------------------------------------------------------------
+// Score correction (post-settlement)
+// ---------------------------------------------------------------------------
+
+/**
+ * Correct the final score of a SETTLED gamble match.
+ *
+ * The recorded office match is re-run through the existing Elo-correction
+ * flow (correctMatch replays every later match through both ledgers and
+ * fixes achievements) — note it deletes and re-creates the match row under a
+ * fresh id, so the gamble match's match_id pointer is updated here instead
+ * of left dangling.
+ *
+ * Every bet's won/lost flag and payout is re-derived from the corrected
+ * score (the "ladder" the site shows). NO bank rows are written: the actual
+ * money that moved at the original settle stays put, and any true-up between
+ * the players and the bookie is done out-of-band (bets.payout becomes the
+ * corrected entitlement, bank_transactions stays the audit of what actually
+ * moved).
+ */
+export function correctGambleScore(
+  gambleMatchId: number,
+  redScore: number,
+  blueScore: number,
+  notes?: string
+): CorrectScoreSummary {
+  const gm = getGambleMatch(gambleMatchId);
+  if (!gm) throw new GambleError('Gamble match not found', 'not_found');
+  if (gm.status !== 'settled') {
+    throw new GambleError(`Only a settled gamble can be corrected (this one is ${gm.status})`, 'not_settled');
+  }
+  if (!gm.match_id) {
+    throw new GambleError('Settlement left no recorded match to correct', 'not_settled');
+  }
+  if (!Number.isInteger(redScore) || !Number.isInteger(blueScore)
+      || redScore < 0 || blueScore < 0 || redScore + blueScore !== gm.outcome_total) {
+    throw new GambleError(`Scores must be whole numbers summing to ${gm.outcome_total}`, 'bad_score');
+  }
+
+  // What the old recorded match said (for the summary/notification)
+  const oldParts = db.prepare(`
+    SELECT team, score FROM match_participants WHERE match_id = ? AND team IN (0, 1) ORDER BY team
+  `).all(gm.match_id) as { team: number; score: number }[];
+  const recordedStillExists = oldParts.length === 2;
+  const previousScore: { red: number | null; blue: number | null } = recordedStillExists
+    ? { red: oldParts[0].score, blue: oldParts[1].score }
+    : { red: null, blue: null };
+
+  // Dangling match_id? The office match-history edit (correctMatch) DELETES
+  // and re-creates the match row under a fresh id — its Elo/achievements are
+  // already correct, so all that's left here is re-pointing the gamble at the
+  // re-created match and re-marking the bets (NO Elo work, NO bank rows).
+  let targetMatchId = gm.match_id;
+  let recordedScores: { red: number; blue: number } | null = recordedStillExists
+    ? { red: oldParts[0].score, blue: oldParts[1].score } : null;
+  if (!recordedStillExists) {
+    // Identify the re-created match: the settle defaults its notes to
+    // 'gamble #<id>' (preserved verbatim by correctMatch), played_at is the
+    // original settle moment (≈ settled_at), it's flagged is_edited, and
+    // carries exactly red@team0 + blue@team1.
+    const candidates = db.prepare(`
+      SELECT m.id, m.played_at, m.notes,
+        GROUP_CONCAT(mp.team || ':' || mp.score) as teams
+      FROM matches m
+      JOIN match_participants mp ON mp.match_id = m.id
+      WHERE m.game_id = ?
+        AND m.id > ?
+        AND m.is_edited = 1
+        AND ABS(strftime('%s', m.played_at) - strftime('%s', ?)) < 600
+        AND (SELECT COUNT(*) FROM match_participants c WHERE c.match_id = m.id) = 2
+      GROUP BY m.id
+      ORDER BY m.id ASC
+    `).all(gm.game_id, gm.match_id, gm.settled_at ?? '') as
+      { id: number; played_at: string; notes: string | null; teams: string }[];
+    const found = candidates
+      .map(c => ({ ...c, scores: c.teams.split(',').map(t => t.split(':').map(Number)) }))
+      .find(c => {
+        const red = c.scores.find(s => s[0] === 0);
+        const blue = c.scores.find(s => s[0] === 1);
+        return red && blue && c.scores.length === 2;
+      });
+    if (!found) {
+      throw new GambleError(
+        `The recorded match #${gm.match_id} is gone — it was re-created by a match-history edit but no re-created row could be located automatically. Find the fresh match id manually and UPDATE gamble_matches SET match_id = <new id> WHERE id = ${gm.id}, then re-run the correction`,
+        'recorded_match_missing'
+      );
+    }
+    const foundRed = found.scores.find(s => s[0] === 0)![1];
+    const foundBlue = found.scores.find(s => s[0] === 1)![1];
+    if (foundRed !== redScore || foundBlue !== blueScore) {
+      throw new GambleError(
+        `A match-history edit has already re-recorded this settle as ${foundRed}-${foundBlue} (match #${found.id}). Re-run the correction with those scores: ${foundRed} ${foundBlue}`,
+        'score_mismatch'
+      );
+    }
+    targetMatchId = found.id;
+    recordedScores = { red: foundRed, blue: foundBlue };
+  }
+
+  const betsBefore = getBets(gambleMatchId);
+
+  // 1. Re-run the match through the Elo-correction replay (also fixes
+  //    achievements) — ONLY when the recorded match row still exists. If a
+  //    match-history edit already re-created it, the Elo side is done; the
+  //    target (already verified above) is used as-is.
+  let newMatchId: number | null = targetMatchId;
+  if (recordedStillExists && recordedScores) {
+    const oldToNew = correctMatch(gm.match_id, [
+      { team: 0, player_ids: [gm.red_player_id], score: recordedScores.red },
+      { team: 1, player_ids: [gm.blue_player_id], score: recordedScores.blue },
+    ]);
+    newMatchId = oldToNew.get(gm.match_id) ?? null;
+  }
+
+  // 2. In one transaction: re-mark the bets and re-point the match.
+  //    Payouts here are the corrected book (stake × frozen odds, what the
+  //    ladder SHOULD have paid) — deliberately no bank credits/debits, the
+  //    bookie trues the money up out-of-band.
+  const betAdjustments: CorrectScoreSummary['betAdjustments'] = [];
+  let betsAdjusted = 0;
+  db.transaction(() => {
+    const updateBet = db.prepare(`UPDATE bets SET status = ?, payout = ? WHERE id = ?`);
+    for (const bet of betsBefore) {
+      if (bet.status === 'refunded') continue; // refunded before the close — untouched
+      const won = bet.red_score === redScore && bet.blue_score === blueScore;
+      const newStatus: 'won' | 'lost' = won ? 'won' : 'lost';
+      const newPayout = won ? Math.floor(bet.stake * bet.decimal_odds) : 0;
+      const changed = newStatus !== bet.status || (bet.payout ?? 0) !== newPayout;
+      if (changed) {
+        updateBet.run(newStatus, newPayout, bet.id);
+        betsAdjusted++;
+      }
+      betAdjustments.push({
+        bettor_id: bet.bettor_id,
+        bettor_name: bet.bettor_name ?? `player ${bet.bettor_id}`,
+        pick: `${bet.red_score}-${bet.blue_score}`,
+        stake: bet.stake,
+        was: { status: bet.status, payout: bet.payout ?? 0 },
+        now: { status: newStatus, payout: newPayout },
+        changed,
+      });
+    }
+    db.prepare(`UPDATE gamble_matches SET match_id = ?, corrected_at = ? WHERE id = ?`)
+      .run(newMatchId, nowDbDate(), gambleMatchId);
+  })();
+
+  // Stamp the correction onto the (new) match's notes when a fresh Elo replay
+  // ran; a re-created match already carries the editor's trace (is_edited).
+  if (notes?.trim() && recordedStillExists && newMatchId) {
+    db.prepare(`UPDATE matches SET notes = COALESCE(NULLIF(notes, '') || ' | ', '') || ? WHERE id = ?`)
+      .run(`score corrected to ${redScore}-${blueScore}: ${notes.trim()}`, newMatchId);
+  }
+
+  return {
+    gambleMatchId,
+    previousMatchId: gm.match_id,
+    matchId: newMatchId,
+    previousScore,
+    finalScore: { red: redScore, blue: blueScore },
+    betsAdjusted,
+    betAdjustments,
+    note: 'Match re-recorded and bets re-marked only — banking true-ups are settled with the bookie (no bank rows written).',
+  };
 }
 
 /** Refund everything on a cancel: open bet stakes + both entry fees.

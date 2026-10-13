@@ -740,6 +740,7 @@ for (const stmt of [
   `ALTER TABLE challenge_terms ADD COLUMN special_rules TEXT`,
   `ALTER TABLE gamble_matches ADD COLUMN payout_line TEXT NOT NULL DEFAULT 'true_even'`,
   `ALTER TABLE gamble_matches ADD COLUMN special_rules TEXT`,
+  `ALTER TABLE gamble_matches ADD COLUMN corrected_at TEXT`,
 ]) {
   try { db.exec(stmt); } catch { /* column already exists */ }
 }

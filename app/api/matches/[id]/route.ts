@@ -89,6 +89,19 @@ export async function PUT(
       );
     }
 
+    // A match that backs a settled gamble must be corrected through the
+    // gamble flow — the gamble's match_id pointer and its bets' won/lost
+    // records must be re-derived with the new score (the Elo replay re-creates
+    // match rows under fresh ids, which would leave match_id dangling).
+    const gambleRef = db.prepare(`SELECT id FROM gamble_matches WHERE match_id = ? AND status = 'settled'`)
+      .get(matchId) as { id: number } | undefined;
+    if (gambleRef) {
+      return NextResponse.json(
+        { error: `This match is the settlement record of gamble #${gambleRef.id} — correct its score on the gamble match page (/gambling/matches/${gambleRef.id}) so the bet ladder is corrected too` },
+        { status: 409 }
+      );
+    }
+
     // Parse request body
     const body = await request.json();
     const { teams } = body as {
@@ -112,7 +125,8 @@ export async function PUT(
       }
     }
 
-    // Perform the correction
+    // Perform the correction (gamble-backed matches are rejected above —
+    // they must go through the gamble correction flow)
     correctMatch(matchId, teams);
 
     revalidatePath('/', 'layout');
@@ -151,6 +165,18 @@ export async function DELETE(
       return NextResponse.json(
         { error: 'Match can only be deleted within 24 hours of being recorded' },
         { status: 403 }
+      );
+    }
+
+    // A settled gamble's settlement record can only be undone together with
+    // the gamble itself — deleting it here would dangle gamble_matches.match_id
+    // and leave the bet ladder forever wrong.
+    const gambleRef = db.prepare(`SELECT id FROM gamble_matches WHERE match_id = ? AND status = 'settled'`)
+      .get(matchId) as { id: number } | undefined;
+    if (gambleRef) {
+      return NextResponse.json(
+        { error: `This match is the settlement record of gamble #${gambleRef.id} — settle corrections with the bookie instead of deleting it` },
+        { status: 409 }
       );
     }
 

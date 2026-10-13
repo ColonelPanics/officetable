@@ -176,3 +176,36 @@ export async function announceCancelled(gambleMatch: GambleMatch, refundTotal: n
   };
   await sendAnnouncementNotification(message);
 }
+/** Final score corrected on a settled gamble — the recorded match was re-run
+ *  through the Elo replay and every bet re-marked; the bookie trues the money
+ *  up out-of-band. */
+export async function announceCorrected(
+  gambleMatch: GambleMatch,
+  from: { red: number | null; blue: number | null },
+  to: { red: number; blue: number },
+): Promise<void> {
+  const avatars = avatarMapFor([gambleMatch.red_player_id ?? -1, gambleMatch.blue_player_id ?? -1]);
+  const red = gambleMatch.red_player_name ?? 'Player';
+  const blue = gambleMatch.blue_player_name ?? 'Player';
+  const draw = to.red === to.blue;
+  const redWon = !draw && to.red > to.blue;
+  const knownFrom = from.red != null && from.blue != null
+    ? `The final score was wrongly recorded as ${from.red}–${from.blue}; it is now ${to.red}–${to.blue}.`
+    : `The recorded final score is now ${to.red}–${to.blue} (re-recorded from the match page).`;
+  const message: AnnouncementMessage = {
+    title: `♻️ Score corrected — ${red} ${to.red}–${to.blue} ${blue}`,
+    subtitle: gambleMatch.game_name,
+    paragraphs: [
+      `${knownFrom} Bets have been re-marked accordingly — any pays/repays on that money go through the bookie.`,
+    ],
+    widgets: [
+      faceOffWidget(
+        { name: red, avatarUrl: avatars.get(gambleMatch.red_player_id ?? -1), badge: `${to.red}`, badgeColor: draw ? MUTED : redWon ? WIN : MUTED, muted: !draw && !redWon },
+        { name: blue, avatarUrl: avatars.get(gambleMatch.blue_player_id ?? -1), badge: `${to.blue}`, badgeColor: draw ? MUTED : redWon ? MUTED : WIN, muted: !draw && redWon },
+      ),
+    ],
+    linkUrl: gameMatchUrl(gambleMatch.id, 'matches'),
+    linkText: 'Corrected settlement',
+  };
+  await sendAnnouncementNotification(message);
+}
