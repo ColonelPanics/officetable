@@ -5,9 +5,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import db from '@/lib/db';
 import {
   getGambleMatch, getBets, getBetPool, deriveStatus, syncStatuses,
+  getSettleSummary,
 } from '@/lib/gamble';
 import { isWithinEditWindow } from '@/lib/elo';
 import { gambleErrorResponse } from '@/lib/gambleApi';
+import type { SettleSummary } from '@/lib/types';
 
 export async function GET(
   request: NextRequest,
@@ -35,12 +37,14 @@ export async function GET(
       ? bets.filter(b => b.bettor_id === playerId)
       : [];
 
-    // Final score for a settled gamble: read back the real match the settle
-    // recorded. team 0 = red, team 1 = blue (the settle path guarantees this
-    // orientation). Returned unoriented as {red, blue} for the UI.
+    // Final score + reconstructed settle details for a settled gamble: the
+    // settle itself replays the ledger so the page can show per-player entry
+    // shares + pot split even when nobody just settled in this session.
     let finalScore: { red: number; blue: number } | null = null;
     let recordedPlayedAt: string | null = null;
+    let summary: SettleSummary | null = null;
     if (gm.status === 'settled' && gm.match_id) {
+      summary = getSettleSummary(gm.id);
       const parts = db.prepare(`
         SELECT team, score FROM match_participants
         WHERE match_id = ? AND team IN (0, 1) ORDER BY team`)
@@ -64,6 +68,7 @@ export async function GET(
       bets,
       pool,
       final_score: finalScore,
+      summary,
       my_bets: myBets,
       my_staked: myBets.reduce((s, b) => s + b.stake, 0),
       is_participant: isParticipant,

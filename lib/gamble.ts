@@ -19,6 +19,7 @@ import type {
   GambleMatch,
   GambleMatchStatus,
   OddsLadder,
+  PayoutLine,
   ScoreOutcome,
   CorrectScoreSummary,
   SettleSummary,
@@ -844,6 +845,116 @@ export function settleGambleMatch(
   // Payouts/fees moved — push them toward the central bank (bounded drain).
   kickBankSync();
   return summary;
+}
+
+
+/**
+ * Reconstruct a settled gamble's SettleSummary from the bets + bank ledger.
+ * Used to show the settlement on a match page when it wasn't just performed
+ * in-browser (the ledger already holds the exact entry shares + pot split —
+ * the same rows the live settle wrote).
+ */
+export function getSettleSummary(gambleMatchId: number): SettleSummary | null {
+  const gm = getGambleMatch(gambleMatchId);
+  if (!gm || gm.status !== 'settled') return null;
+
+  const bets = getBets(gambleMatchId);
+  const wonBets = bets.filter(b => b.status === 'won' || b.status === 'lost') as (Bet & { status: 'won' | 'lost' })[];
+  // Note: after a score correction the bets table holds the corrected book
+  // while the ledger still shows the original settle's monetary movements —
+  // money true-ups happen with the bookie directly (see CorrectScoreSummary).
+  const pool = wonBets.reduce((s, b) => s + b.stake, 0);
+  const returns = wonBets.reduce((s, b) => s + (b.payout ?? 0), 0);
+  const capped = wonBets.some(b => b.status === 'won' && b.payout != null
+    && b.payout < Math.floor(b.stake * b.decimal_odds));
+
+  // Ledger rows the settle wrote (house rows have a NULL player_id). ref_id is
+  // the gamble match id and the types are gamble-settle specific, so this
+  // cannot pick up unrelated transactions.
+  const ledger = db.prepare(`
+    SELECT ref_type, player_id, amount FROM bank_transactions
+    WHERE ref_id = ? AND ref_id IS NOT NULL
+      AND ref_type IN ('house_fee','player_share','pot_winner_share','pot_score_share','pot_house_cut','house_loss')
+    ORDER BY id
+  `).all(gambleMatchId) as { ref_type: string; player_id: number | null; amount: number }[];
+
+  const houseFee = ledger.find(l => l.ref_type === 'house_fee')?.amount ?? 0;
+
+  // Final score from the recorded office match (team 0 = red, 1 = blue).
+  let redScore = 0;
+  let blueScore = 0;
+  if (gm.match_id) {
+    const parts = db.prepare(`
+      SELECT team, score FROM match_participants
+      WHERE match_id = ? AND team IN (0, 1) ORDER BY team`)
+      .all(gm.match_id) as { team: number; score: number }[];
+    if (parts.length === 2) {
+      redScore = parts[0].score;
+      blueScore = parts[1].score;
+    }
+  }
+
+  // Evens-line detection, same rule as the settle itself.
+  const line = gm.payout_line ?? 'true_even';
+  const evenScoreline = line === 'elo_even' ? (gm.odds?.predictedLine ?? '')
+    : line === 'true_even' ? '' : line;
+  const entryEvenHit = evenScoreline !== ''
+    ? `${redScore}-${blueScore}` === evenScoreline
+    : redScore === blueScore;
+
+  const participants: { playerId: number | null; score: number }[] = [
+    { playerId: gm.red_player_id, score: redScore },
+    { playerId: gm.blue_player_id, score: blueScore },
+  ];
+  const playerEntry = participants.map(p => ({
+    playerId: p.playerId ?? -1,
+    fee: gm.entry_fee,
+    returned: ledger.find(l => l.ref_type === 'player_share' && l.player_id === p.playerId)?.amount ?? 0,
+  }));
+
+  const winnerRow = ledger.find(l => l.ref_type === 'pot_winner_share' && l.amount !== 0);
+  const scoreShares = participants.map(p => ({
+    playerId: p.playerId ?? -1,
+    amount: ledger.find(l => l.ref_type === 'pot_score_share' && l.player_id === p.playerId)?.amount ?? 0,
+  }));
+  const houseCut = ledger.find(l => l.ref_type === 'pot_house_cut')?.amount ?? 0;
+  const houseLoss = Math.abs(ledger.find(l => l.ref_type === 'house_loss')?.amount ?? 0);
+  const leftover = houseLoss > 0
+    ? -houseLoss
+    : houseCut > 0 || (winnerRow?.amount ?? 0) > 0 || scoreShares.some(s => s.amount > 0)
+      ? (winnerRow?.amount ?? 0) + scoreShares.reduce((s, x) => s + x.amount, 0) + houseCut
+      : 0;
+
+  return {
+    gambleMatchId,
+    matchId: gm.match_id ?? 0,
+    finalScore: { red: redScore, blue: blueScore },
+    pool,
+    returns,
+    payoutCap: capped ? returns : 0,
+    returnsCapped: capped,
+    payoutLine: line as PayoutLine,
+    entryEvenHit,
+    leftover,
+    betPayments: wonBets.map(b => ({
+      bettor_id: b.bettor_id,
+      bettor_name: b.bettor_name ?? `player ${b.bettor_id}`,
+      pick: `${b.red_score}-${b.blue_score}`,
+      stake: b.stake,
+      status: b.status as 'won' | 'lost',
+      payout: b.payout ?? 0,
+    })),
+    pot: {
+      positive: leftover > 0,
+      house: houseCut,
+      houseFee,
+      winnerPlayerId: winnerRow?.player_id ?? null,
+      winnerShare: winnerRow?.amount ?? 0,
+      scoreShares,
+      houseLoss,
+    },
+    playerEntry,
+  };
 }
 
 

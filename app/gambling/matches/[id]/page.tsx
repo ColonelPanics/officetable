@@ -18,6 +18,8 @@ interface Detail {
   bets: Bet[];
   pool: number;
   final_score: { red: number; blue: number } | null;
+  /** Ledger-reconstructed settlement, present once the gamble is settled. */
+  summary?: SettleSummary | null;
   my_bets: Bet[];
   my_staked: number;
   is_participant: boolean;
@@ -70,7 +72,13 @@ export default function GambleMatchPage() {
     const qs = new URLSearchParams();
     if (me) qs.set('player_id', String(me.id));
     const res = await fetch(`/api/gambling/matches/${id}?${qs}`);
-    if (res.ok) setDetail(await res.json());
+    if (res.ok) {
+      const body = await res.json();
+      setDetail(body);
+      // The API reconstructs the settlement from the ledger for settled
+      // gambles — take it unless a fresher live-settle summary already exists.
+      if (body.summary) setSummary(body.summary);
+    }
     if (me) {
       const bankRes = await fetch(`/api/gambling/bank?player_id=${me.id}`);
       if (bankRes.ok) setBalance(await bankRes.json());
@@ -411,13 +419,34 @@ function BetsPanel({ bets, pool }: { bets: Bet[]; pool: number }) {
 }
 
 function SettledView({ gm, bets, summary, finalScore }: { gm: GambleMatch; bets: Bet[]; summary: SettleSummary | null; finalScore: { red: number; blue: number } | null }) {
-  // When landing directly on a settled match we don't have the settle summary
-  // in memory — the API reads the recorded match's score; fall back to ?.
   const won = bets.filter(b => b.status === 'won');
   const lost = bets.filter(b => b.status === 'lost');
   const refunded = bets.filter(b => b.status === 'refunded');
   const pool = won.reduce((s, b) => s + b.stake, 0) + lost.reduce((s, b) => s + b.stake, 0);
   const returns = won.reduce((s, b) => s + (b.payout ?? 0), 0);
+
+  // Per-player payout: what each participant paid in (entry fee) and what
+  // came back (entry share + pot shares), with a coloured net total — the
+  // same won/lost clarity the bet list has. The API reconstructs the
+  // settlement from the bank ledger, so this shows for reloaded pages too.
+  const entrySplitNote = summary
+    ? (summary.entryEvenHit
+      ? `evens line hit (${summary.payoutLine}) — 50/50 entry split`
+      : `entries split by score${summary.payoutLine && summary.payoutLine !== 'true_even' && summary.payoutLine !== 'elo_even' ? ` (line was ${summary.payoutLine})` : ''}`)
+    : null;
+  const playerCards = ([
+    { id: gm.red_player_id, name: gm.red_player_name ?? 'Red player', colour: 'text-red-600', bg: 'bg-red-50', border: 'border-red-100' },
+    { id: gm.blue_player_id, name: gm.blue_player_name ?? 'Blue player', colour: 'text-blue-600', bg: 'bg-blue-50', border: 'border-blue-100' },
+  ]).map(p => {
+    const entry = summary?.playerEntry.find(pe => pe.playerId === p.id);
+    const scoreShare = summary?.pot.scoreShares.find(s => s.playerId === p.id)?.amount ?? 0;
+    const winnerShare = summary?.pot.winnerPlayerId === p.id ? (summary?.pot.winnerShare ?? 0) : 0;
+    const entryNet = entry ? entry.returned - entry.fee : null;
+    const net = entryNet != null ? entryNet + scoreShare + winnerShare : null;
+    return { ...p, entry, entryNet, scoreShare, winnerShare, net };
+  });
+  const netColour = (n: number) => (n > 0 ? 'text-green-700' : n < 0 ? 'text-red-700' : 'text-gray-500');
+  const signed = (n: number) => `${n > 0 ? '+' : n < 0 ? '−' : ''}${Math.abs(n)}`;
 
   return (
     <div className="rounded-xl border border-gray-200 bg-card p-5 space-y-4">
@@ -430,26 +459,57 @@ function SettledView({ gm, bets, summary, finalScore }: { gm: GambleMatch; bets:
         <div className="text-sm text-gray-600">Gamble cancelled — all stakes and entry fees refunded.</div>
       ) : (
         <>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+          {/* Who got what: entry back + pot shares + coloured net total */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {playerCards.map(p => (
+              <div key={p.id} className={`rounded-lg border ${p.border} ${p.bg} p-3`}>
+                <div className="flex items-baseline justify-between gap-2">
+                  <div className={`font-bold ${p.colour}`}>{p.name}</div>
+                  {p.net != null ? (
+                    <div className={`font-bold ${netColour(p.net)}`}>
+                      {signed(p.net)} net
+                    </div>
+                  ) : (
+                    <div className="text-xs text-gray-400">net pending</div>
+                  )}
+                </div>
+                <ul className="text-xs text-gray-700 mt-1.5 space-y-0.5">
+                  {p.entry ? (
+                    <li>
+                      Entry: paid <b>{p.entry.fee}</b> → got back <b>{p.entry.returned}</b>{' '}
+                      <span className={`font-semibold ${netColour(p.entryNet ?? 0)}`}>({signed(p.entryNet ?? 0)})</span>
+                    </li>
+                  ) : (
+                    <li className="text-gray-400">entry share pending</li>
+                  )}
+                  {(p.scoreShare > 0 || p.winnerShare > 0) ? (
+                    <li>
+                      Pot:{p.winnerShare > 0 && <> winner share <b>{p.winnerShare}</b></>}
+                      {p.scoreShare > 0 && <> score share <b>{p.scoreShare}</b></>}
+                      {(p.scoreShare + p.winnerShare) > 0 && ` (+${p.scoreShare + p.winnerShare})`}
+                    </li>
+                  ) : (
+                    <li className="text-gray-400">no pot share</li>
+                  )}
+                </ul>
+              </div>
+            ))}
+          </div>
+          {summary && (
+            <div className="text-[11px] text-gray-400 -mt-2">
+              {entrySplitNote} · house took <b>{summary.pot.houseFee}</b> fee on entries
+              {summary.pot.house > 0
+                ? ` · house kept ${summary.pot.house} of the pot`
+                : summary.pot.houseLoss > 0 ? ` · house covered −${summary.pot.houseLoss}` : ''}
+              {summary.returnsCapped && ` · winnings capped at bet pool + house bank − 1 (${summary.payoutCap} was payable)`}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
             <div className="rounded-lg bg-gray-50 p-3">
               <div className="text-xs text-gray-500 uppercase">Bet pool</div>
               <div className="font-bold text-gray-900">{summary ? summary.pool : pool}</div>
-              <div className="text-xs text-gray-500">{won.length} won · {lost.length} lost</div>
-            </div>
-            <div className="rounded-lg bg-gray-50 p-3">
-              <div className="text-xs text-gray-500 uppercase">Player entries</div>
-              {summary ? (
-                <>
-                  {summary.playerEntry.map(pe => (
-                    <div key={pe.playerId} className="text-gray-800">
-                      kept <b>{pe.returned}</b> of {pe.fee}
-                    </div>
-                  ))}
-                  <div className="text-[11px] text-gray-400">
-                    {summary.entryEvenHit ? `evens line hit (${summary.payoutLine}) — 50/50 split` : `split by score${summary.payoutLine && summary.payoutLine !== 'true_even' && summary.payoutLine !== 'elo_even' ? ` (line was ${summary.payoutLine})` : ''}`}
-                  </div>
-                </>
-              ) : <div className="text-gray-500">kept share of entry, split by score</div>}
+              <div className="text-xs text-gray-500">{won.length} won · {lost.length} lost · paid out {summary ? summary.returns : returns}</div>
             </div>
             <div className="rounded-lg bg-gray-50 p-3">
               <div className="text-xs text-gray-500 uppercase">Bank pot</div>
@@ -459,7 +519,6 @@ function SettledView({ gm, bets, summary, finalScore }: { gm: GambleMatch; bets:
                     <div>house <b>{summary.pot.house}</b></div>
                     <div>winner <b>{summary.pot.winnerShare}</b></div>
                     <div>score split <b>{summary.pot.scoreShares.map(s => s.amount).join(' / ')}</b></div>
-                    <div className="text-[11px] text-gray-400">+{summary.pot.houseFee} house fee on entries</div>
                   </div>
                 ) : (
                   <div className="text-red-700">house covered −{summary.pot.houseLoss}</div>
@@ -467,11 +526,6 @@ function SettledView({ gm, bets, summary, finalScore }: { gm: GambleMatch; bets:
               ) : (
                 <div className="text-gray-500">
                   pot {pool ? `${Math.max(0, pool - returns)} left` : undefined} · returns {returns}
-                </div>
-              )}
-              {summary?.returnsCapped && (
-                <div className="text-[11px] text-gray-400">
-                  winnings capped at bet pool + house bank − 1 ({summary.payoutCap} was payable)
                 </div>
               )}
             </div>
