@@ -1,7 +1,7 @@
 import db from './db';
 import { resolveSeason, toDbDate } from './seasons';
 import { getBank } from './bank';
-import { computeTimelineStats, parsePointTimeline, type PointTimeline } from './timeline';
+import { computeTimelineStats, parsePointTimeline, MARATHON_MINUTES, type PointTimeline } from './timeline';
 
 export interface AchievementContext {
   matchId: number;
@@ -1090,14 +1090,80 @@ export function checkAchievements(context: AchievementContext): AchievementResul
       }
     }
 
-    // Marathon: winning a live-tracked match that lasted 20+ minutes.
-    if (!isDraw && durationMin !== null && durationMin >= 20) {
+    // Marathon: winning a live-tracked match that lasted 15+ minutes
+    // (MARATHON_MINUTES in lib/timeline.ts — same threshold as the punditry).
+    if (!isDraw && durationMin !== null && durationMin >= MARATHON_MINUTES) {
       for (const winnerId of winnerIds) {
         results.push({
           achievementName: 'marathon',
           playerId: winnerId,
           matchId,
           metadata: { duration_seconds: Math.round(stats.durationMs! / 1000), points: stats.pointCount }
+        });
+      }
+    }
+
+    // Dying Breath: the loser's ONLY point was the very last event of the
+    // game — a flawless win denied at the death. Like the_frustrator (which
+    // fires in best_of games for the 1-x scoreline) but this one is about
+    // WHEN the point landed, so it needs the timeline.
+    if (!isDraw && context.timeline.events.length > 0) {
+      const lastEvent = context.timeline.events[context.timeline.events.length - 1];
+      const losingTeamIndex = teams.findIndex(t => t.score < maxScore);
+      const loserScore = losingTeamIndex >= 0 ? teams[losingTeamIndex].score : -1;
+      if (losingTeamIndex >= 0 && loserScore === 1 && lastEvent.team === losingTeamIndex) {
+        for (const playerId of teams[losingTeamIndex].player_ids) {
+          results.push({
+            achievementName: 'dying_breath',
+            playerId,
+            matchId,
+            metadata: {
+              score: `${maxScore}-${loserScore}`,
+              at_seconds: Math.round(lastEvent.at / 1000)
+            }
+          });
+        }
+      }
+    }
+
+    // Opener: score the first point in 3 consecutive games — each of the
+    // three must be live-tracked (that's the only way the first point is
+    // knowable), so un-tracked games count toward the limit and break the
+    // run. Per-season dedup: once earned, a longer run doesn't re-fire it.
+    for (const p of participants) {
+      const existing = db.prepare(`
+        SELECT COUNT(*) as count FROM player_achievements pa
+        JOIN achievements a ON pa.achievement_id = a.id
+        WHERE pa.player_id = ? AND pa.game_id = ? AND pa.season_id = ? AND a.name = 'opener'
+      `).get(p.player_id, gameId, seasonId) as { count: number };
+      if (existing.count > 0) continue;
+
+      const recent = db.prepare(`
+        SELECT m.id, m.points_timeline,
+          (SELECT team FROM match_participants WHERE match_id = m.id AND player_id = ? LIMIT 1) as my_team
+        FROM (
+          SELECT DISTINCT m2.id
+          FROM match_participants mp2
+          JOIN matches m2 ON mp2.match_id = m2.id
+          WHERE mp2.player_id = ? AND m2.game_id = ? AND m2.id <= ? AND m2.season_id = ?
+        ) latest
+        JOIN matches m ON m.id = latest.id
+        ORDER BY m.played_at DESC, m.id DESC
+        LIMIT 3
+      `).all(p.player_id, p.player_id, gameId, matchId, seasonId) as
+        { id: number; points_timeline: string | null; my_team: number }[];
+      if (recent.length < 3) continue;
+
+      const openedAll = recent.every(row => {
+        const tl = parsePointTimeline(row.points_timeline);
+        return tl !== null && tl.events.length > 0 && tl.events[0].team === row.my_team;
+      });
+      if (openedAll) {
+        results.push({
+          achievementName: 'opener',
+          playerId: p.player_id,
+          matchId,
+          metadata: { streak: 3 }
         });
       }
     }

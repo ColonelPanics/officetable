@@ -308,7 +308,9 @@ const seedAchievements = db.prepare(`
     ('streak_breaker', 'End someone''s 5 or more game winning streak', 'streak', '🛑'),
     ('wire_to_wire', 'Score the first point and never trail in a live-tracked match', 'special', '🛡️'),
     ('comeback_kid', 'Trail by 2 or more points and still win a live-tracked match', 'special', '🔄'),
-    ('marathon', 'Win a live-tracked match that lasted 20 minutes or more', 'special', '⏱️')
+    ('marathon', 'Win a live-tracked match that lasted 15 minutes or more', 'special', '⏱️'),
+    ('dying_breath', 'Prevent a flawless win by scoring your only point on the last point of the game', 'special', '🫀'),
+    ('opener', 'Score the first point in 3 live-tracked games in a row', 'streak', '🎺')
 `);
 seedAchievements.run();
 
@@ -521,11 +523,24 @@ const updateAchievementIcons = db.prepare(`
     WHEN 'wire_to_wire' THEN '🛡️'
     WHEN 'comeback_kid' THEN '🔄'
     WHEN 'marathon' THEN '⏱️'
+    WHEN 'dying_breath' THEN '🫀'
+    WHEN 'opener' THEN '🎺'
     ELSE icon
   END
   WHERE icon IS NULL OR icon = ''
 `);
 updateAchievementIcons.run();
+
+// Migration: achievement descriptions are curated text — when a check's
+// definition changes (marathon moved to 15 minutes), existing rows should
+// say the same thing as newly seeded ones. Idempotent.
+const updateAchievementDescriptions = db.prepare(`
+  UPDATE achievements SET description = CASE name
+    WHEN 'marathon' THEN 'Win a live-tracked match that lasted 15 minutes or more'
+    ELSE description
+  END
+`);
+updateAchievementDescriptions.run();
 
 // Migration: an achievement's earned_at must be the moment it was EARNED —
 // the match's own timestamp — not the moment the achievement check ran.

@@ -65,6 +65,11 @@ const MAX_EVENTS = 1000;
 /** 24h — a sane upper bound on point offsets / durations. */
 const MAX_MS = 24 * 60 * 60 * 1000;
 
+/** Marathon achievement / punditry threshold: a live-tracked match lasting
+ *  at least this long is a marathon (shared so the achievement and punditry
+ *  vocabulary stay in sync). */
+export const MARATHON_MINUTES = 15;
+
 /**
  * Validate + normalise a raw (untrusted JSON) timeline for a match being
  * created with `teams` (CreateMatchInput['teams']) and that team layout's

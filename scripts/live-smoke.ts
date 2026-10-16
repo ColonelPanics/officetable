@@ -8,7 +8,7 @@ import { getBank } from '../lib/bank';
 import { createChallenge, createTeamChallenge, respondToChallenge, settleGambleMatch, correctGambleScore, syncStatuses } from '../lib/gamble';
 import { recalculateAchievementsForGame, deleteAchievementsForMatch } from '../lib/achievements';
 import { getPunditryForMatch } from '../lib/punditry';
-import { validatePointTimeline, parsePointTimeline, computeTimelineStats } from '../lib/timeline';
+import { validatePointTimeline, parsePointTimeline, computeTimelineStats, MARATHON_MINUTES } from '../lib/timeline';
 import type { CreateMatchInput } from '../lib/types';
 
 function assert(cond: boolean, label: string): void {
@@ -108,7 +108,7 @@ const teams: CreateMatchInput['teams'] = [
   const result = processMatch({ game_id: gameId, notes: undefined, teams: wt, timeline }, new Date(START));
   assert(hasAchievement(result.matchId, 'wire_to_wire', playerIds[0]), 'wire_to_wire earned by team 0 player');
   assert(!hasAchievement(result.matchId, 'comeback_kid'), 'no comeback for wire-to-wire');
-  assert(!hasAchievement(result.matchId, 'marathon'), 'no marathon under 20 min');
+  assert(!hasAchievement(result.matchId, 'marathon'), 'no marathon under 15 min');
 
   // Punditry sees the wire-to-wire fact
   const facts = getPunditryForMatch(result.matchId);
@@ -166,13 +166,17 @@ const teams: CreateMatchInput['teams'] = [
   ];
   const timeline = { start: START, end: '2026-01-15T10:22:00.000Z', events };
   const stats = computeTimelineStats(timeline, marTeams.map(t => t.score));
-  assert((stats.durationMs ?? 0) >= 20 * 60_000, 'marathon duration ≥ 20 min');
+  assert((stats.durationMs ?? 0) >= MARATHON_MINUTES * 60_000, 'marathon duration ≥ threshold (22 min)');
   assert(stats.firstScorer === 0, 'team 0 scored first');
   assert(stats.teams[0].everTrailed && stats.teams[1].everTrailed, 'both teams trailed in the see-saw');
   assert(stats.leadChanges === 4, 'four lead changes in the see-saw');
 
   const result = processMatch({ game_id: gameId, notes: undefined, teams: marTeams, timeline }, new Date(START));
-  assert(hasAchievement(result.matchId, 'marathon', playerIds[0]), 'marathon earned by winner');
+  assert(hasAchievement(result.matchId, 'marathon', playerIds[0]), 'marathon earned by winner (22 min ≥ 15)');
+  // Opener: the last 3 of player A's matches are wire-to-wire, comeback and
+  // this one — A's side scored the first point in ALL of them.
+  assert(hasAchievement(result.matchId, 'opener', playerIds[0]), 'opener for 3 straight first points (wire, comeback, marathon)');
+  assert(!hasAchievement(result.matchId, 'opener', playerIds[1]), 'loser opened none of the three');
   assert(!hasAchievement(result.matchId, 'marathon', playerIds[1]), 'loser gets no marathon');
   assert(!hasAchievement(result.matchId, 'wire_to_wire'), 'trailing in see-saw → no wire_to_wire');
 
@@ -367,6 +371,67 @@ const teams: CreateMatchInput['teams'] = [
   );
   assert(dTimeline !== null && dTimeline.events.length === 10 && dTimeline.events[4].team === 0,
     '2v2 attached settle carries the timeline');
+}
+
+
+// ---------------------------------------------------------------------------
+// Dying Breath + the marathon threshold boundary
+// ---------------------------------------------------------------------------
+{
+  const eNames = [`DeathA-${Date.now()}`, `DeathB-${Date.now()}`];
+  const eIds = eNames.map(n => (db.prepare('INSERT INTO players (name) VALUES (?)').run(n).lastInsertRowid as number));
+
+  // 2-0 in 16 minutes: marathon fires at the 15-minute threshold...
+  const m1 = validatePointTimeline(
+    { start: START, end: '2026-01-15T10:16:00.000Z', events: [0, 0].map((team, i) => ({ team, at: (i + 1) * 300_000 })) },
+    [{ team: 0, player_ids: [eIds[0]], score: 2 }, { team: 1, player_ids: [eIds[1]], score: 0 }],
+    [2, 0]
+  );
+  assert(!m1.error && !!m1.timeline, 'E1 timeline validates');
+  const r1 = processMatch({
+    game_id: gameId,
+    notes: undefined,
+    teams: [{ team: 0, player_ids: [eIds[0]], score: 2 }, { team: 1, player_ids: [eIds[1]], score: 0 }],
+    timeline: m1.timeline,
+  }, new Date(START));
+  assert(hasAchievement(r1.matchId, 'marathon', eIds[0]), 'marathon at the 15-minute threshold (16 min win)');
+
+  // 2-1 where the loser's first (and only) point was the LAST event:
+  // flawless victory denied at the death.
+  const m2 = validatePointTimeline(
+    { start: START, events: [0, 0, 1].map((team, i) => ({ team, at: (i + 1) * 120_000 })) },
+    [{ team: 0, player_ids: [eIds[0]], score: 2 }, { team: 1, player_ids: [eIds[1]], score: 1 }],
+    [2, 1]
+  );
+  assert(!m2.error && !!m2.timeline, 'E2 timeline validates');
+  const r2 = processMatch({
+    game_id: gameId,
+    notes: undefined,
+    teams: [{ team: 0, player_ids: [eIds[0]], score: 2 }, { team: 1, player_ids: [eIds[1]], score: 1 }],
+    timeline: m2.timeline,
+  }, new Date(START));
+  assert(hasAchievement(r2.matchId, 'dying_breath', eIds[1]), 'dying_breath for the last-point scorer');
+  assert(!hasAchievement(r2.matchId, 'dying_breath', eIds[0]), 'winner earns no dying_breath');
+
+  // Negative: loser scored their FIRST point mid-game, not last (2-2 → 3-2):
+  // flawless was already gone before the death.
+  const m3 = validatePointTimeline(
+    { start: START, events: [0, 0, 0, 1, 1].map((team, i) => ({ team, at: (i + 1) * 120_000 })) },
+    [{ team: 0, player_ids: [eIds[0]], score: 3 }, { team: 1, player_ids: [eIds[1]], score: 2 }],
+    [3, 2]
+  );
+  assert(!m3.error && !!m3.timeline, 'E3 timeline validates');
+  const r3 = processMatch({
+    game_id: gameId,
+    notes: undefined,
+    teams: [{ team: 0, player_ids: [eIds[0]], score: 3 }, { team: 1, player_ids: [eIds[1]], score: 2 }],
+    timeline: m3.timeline,
+  }, new Date(START));
+  const events3 = parsePointTimeline(
+    (db.prepare('SELECT points_timeline FROM matches WHERE id = ?').get(r3.matchId) as { points_timeline: string }).points_timeline
+  );
+  void events3;
+  assert(!hasAchievement(r3.matchId, 'dying_breath', eIds[1]), 'no dying_breath when flawless was denied earlier');
 }
 
 console.log(process.exitCode ? 'SMOKE FAILED' : 'LIVE SMOKE OK');

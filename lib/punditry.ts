@@ -1,5 +1,5 @@
 import db from './db';
-import { computeTimelineStats, parsePointTimeline } from './timeline';
+import { computeTimelineStats, parsePointTimeline, MARATHON_MINUTES } from './timeline';
 
 export interface PunditryFact {
   type: string;
@@ -687,7 +687,7 @@ export function getPunditryForMatch(matchId: number): PunditryFact[] {
     // Duration + pace
     if (stats.durationMs !== null) {
       const minutes = stats.durationMs / 60000;
-      if (minutes >= 20) {
+      if (minutes >= MARATHON_MINUTES) {
         facts.push({
           type: 'record',
           player_id: 0,
