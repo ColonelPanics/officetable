@@ -154,7 +154,13 @@ export default function GambleMatchPage() {
   }
 
   async function cancelMatch() {
-    if (!me) return;
+    if (!me || !detail) return;
+    const refundTotal = 2 * detail.match.entry_fee + detail.pool;
+    if (!confirm(
+      `Cancel this gamble? ${detail.bets.length} bet${detail.bets.length === 1 ? '' : 's'} totalling ${detail.pool} bucks ` +
+      `will be refunded, plus both ${detail.match.entry_fee}-buck entry fees (${refundTotal} total).\n\n` +
+      'The challenge closes as cancelled — it cannot be undone.',
+    )) return;
     setBusy(true);
     setError(null);
     try {
