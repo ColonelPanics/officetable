@@ -1,3 +1,6 @@
+import type { PointTimeline } from './timeline';
+export type { PointTimeline, PointTimelineEvent, TimelineStats, TimelineTeamStats } from './timeline';
+
 export interface Player {
   id: number;
   name: string;
@@ -34,6 +37,8 @@ export interface Match {
   season_id: number;
   is_edited?: number;
   edited_at?: string | null;
+  /** Live-scorer point timeline (JSON text, see lib/timeline.ts). NULL = not live-recorded. */
+  points_timeline?: string | null;
 }
 
 export interface MatchParticipant {
@@ -78,6 +83,9 @@ export interface CreateMatchInput {
     player_ids: number[];
     score: number;
   }[];
+  /** Live-scorer point timeline (validated by lib/timeline.validatePointTimeline).
+   *  Event `team` indexes THIS teams array. */
+  timeline?: PointTimeline | null;
 }
 
 export interface GameStats {

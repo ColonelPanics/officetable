@@ -3,6 +3,7 @@ import { revalidatePath } from 'next/cache';
 import db from '@/lib/db';
 import { correctMatch, deleteMatchAndReplay, isWithinEditWindow } from '@/lib/elo';
 import { getPunditryForMatch } from '@/lib/punditry';
+import { validatePointTimeline } from '@/lib/timeline';
 
 export async function GET(
   request: NextRequest,
@@ -104,8 +105,9 @@ export async function PUT(
 
     // Parse request body
     const body = await request.json();
-    const { teams } = body as {
+    const { teams, timeline: rawTimeline } = body as {
       teams: { team: number; player_ids: number[]; score: number }[];
+      timeline?: unknown;
     };
 
     if (!teams || teams.length < 2) {
@@ -125,9 +127,27 @@ export async function PUT(
       }
     }
 
+    // Optional corrected timeline (live-recorded matches may re-score points).
+    // Omitted = keep the original timeline verbatim; explicit null drops it.
+    let timeline: Parameters<typeof correctMatch>[2] = undefined;
+    if (rawTimeline !== undefined) {
+      if (rawTimeline === null) {
+        timeline = null;
+      } else {
+        const checked = validatePointTimeline(rawTimeline, teams, teams.map(t => t.score));
+        if (checked.error || !checked.timeline) {
+          return NextResponse.json(
+            { error: checked.error ?? 'Invalid timeline' },
+            { status: 400 }
+          );
+        }
+        timeline = checked.timeline;
+      }
+    }
+
     // Perform the correction (gamble-backed matches are rejected above —
     // they must go through the gamble correction flow)
-    correctMatch(matchId, teams);
+    correctMatch(matchId, teams, timeline);
 
     revalidatePath('/', 'layout');
     return NextResponse.json({ success: true });

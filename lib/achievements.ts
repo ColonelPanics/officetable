@@ -1,6 +1,7 @@
 import db from './db';
 import { resolveSeason, toDbDate } from './seasons';
 import { getBank } from './bank';
+import { computeTimelineStats, parsePointTimeline, type PointTimeline } from './timeline';
 
 export interface AchievementContext {
   matchId: number;
@@ -25,6 +26,10 @@ export interface AchievementContext {
     elo_after: number;
   }[];
   playerNameMap: Map<number, string>;
+  /** Live-scorer timeline when the match was recorded live (points order +
+   *  timing). Absent/NULL for matches recorded the normal way — checks that
+   *  need game-state facts skip. Teams are indexed like context.teams. */
+  timeline?: PointTimeline | null;
 }
 
 export interface AchievementResult {
@@ -1040,6 +1045,64 @@ export function checkAchievements(context: AchievementContext): AchievementResul
     }
   }
 
+  // ===== LIVE GAME-STATE DETECTION =====
+  //
+  // Earnable only when the match was live-tracked (timeline present) — the
+  // final score alone can't prove point ORDER or DURATION. Timeline team
+  // indexes line up with the teams array (enforced by the recorder).
+  if (context.timeline && context.timeline.events.length > 0) {
+    const stats = computeTimelineStats(context.timeline, teams.map(t => t.score));
+    const durationMin = stats.durationMs !== null ? stats.durationMs / 60000 : null;
+
+    // Wire to Wire: scored the first point and never trailed. Every member
+    // of a wire-to-wire winning team earns it.
+    for (const teamIndex of stats.wireToWireWinners) {
+      for (const playerId of teams[teamIndex]?.player_ids ?? []) {
+        results.push({
+          achievementName: 'wire_to_wire',
+          playerId,
+          matchId,
+          metadata: { points: stats.pointCount, duration_seconds: stats.durationMs !== null ? Math.round(stats.durationMs / 1000) : null }
+        });
+      }
+    }
+
+    // Comeback Kid: trailed by 2+ points at some point yet won. Both the
+    // team members and the SIZE of the deficit go in the metadata.
+    if (!isDraw) {
+      const loserScore = teams.find(t => t.score < maxScore)?.score ?? 0;
+      for (let teamIndex = 0; teamIndex < teams.length; teamIndex++) {
+        const team = teams[teamIndex];
+        const teamStats = stats.teams[teamIndex];
+        if (team.score !== maxScore || !teamStats || teamStats.maxDeficit < 2) continue;
+        for (const playerId of team.player_ids) {
+          results.push({
+            achievementName: 'comeback_kid',
+            playerId,
+            matchId,
+            metadata: {
+              max_deficit: teamStats.maxDeficit,
+              score: `${team.score}-${loserScore}`,
+              duration_seconds: stats.durationMs !== null ? Math.round(stats.durationMs / 1000) : null
+            }
+          });
+        }
+      }
+    }
+
+    // Marathon: winning a live-tracked match that lasted 20+ minutes.
+    if (!isDraw && durationMin !== null && durationMin >= 20) {
+      for (const winnerId of winnerIds) {
+        results.push({
+          achievementName: 'marathon',
+          playerId: winnerId,
+          matchId,
+          metadata: { duration_seconds: Math.round(stats.durationMs! / 1000), points: stats.pointCount }
+        });
+      }
+    }
+  }
+
   return results;
 }
 
@@ -1185,11 +1248,11 @@ export function recalculateAchievementsForGame(gameId: number, seasonId?: number
 
   // Get all matches for this game in chronological order
   const matches = db.prepare(`
-    SELECT m.id, m.played_at, m.notes, m.season_id
+    SELECT m.id, m.played_at, m.notes, m.season_id, m.points_timeline
     FROM matches m
     WHERE m.game_id = ?${seasonId !== undefined ? ' AND m.season_id = ?' : ''}
     ORDER BY m.played_at ASC, m.id ASC
-  `).all(...(seasonId !== undefined ? [gameId, seasonId] : [gameId])) as { id: number; played_at: string; notes: string | null; season_id: number }[];
+  `).all(...(seasonId !== undefined ? [gameId, seasonId] : [gameId])) as { id: number; played_at: string; notes: string | null; season_id: number; points_timeline: string | null }[];
 
   // Get player name map
   const players = db.prepare('SELECT id, name FROM players').all() as { id: number; name: string }[];
@@ -1236,7 +1299,8 @@ export function recalculateAchievementsForGame(gameId: number, seasonId?: number
       playedAtDb: match.played_at,
       teams,
       participants,
-      playerNameMap
+      playerNameMap,
+      timeline: parsePointTimeline(match.points_timeline)
     });
 
     if (achievementResults.length > 0) {

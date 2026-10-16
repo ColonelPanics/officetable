@@ -1,4 +1,5 @@
 import db from './db';
+import { computeTimelineStats, parsePointTimeline } from './timeline';
 
 export interface PunditryFact {
   type: string;
@@ -207,10 +208,10 @@ export function getPunditryForMatch(matchId: number): PunditryFact[] {
 
   // Get match info
   const match = db.prepare(`
-    SELECT m.id, m.game_id, m.played_at, m.season_id
+    SELECT m.id, m.game_id, m.played_at, m.season_id, m.points_timeline
     FROM matches m
     WHERE m.id = ?
-  `).get(matchId) as { id: number; game_id: number; played_at: string; season_id: number } | null;
+  `).get(matchId) as { id: number; game_id: number; played_at: string; season_id: number; points_timeline: string | null } | null;
 
   if (!match) return facts;
 
@@ -619,6 +620,89 @@ export function getPunditryForMatch(matchId: number): PunditryFact[] {
             });
           }
         }
+      }
+    }
+  }
+
+  // ===== LIVE TIMELINE FACTS =====
+  //
+  // Game-state punditry off the live scorer's point timeline: comebacks,
+  // wire-to-wire runs, lead changes, duration + pace. Timeline team indexes
+  // follow the team labels (0, 1, ...) the match was recorded with.
+  const timeline = parsePointTimeline(match.points_timeline);
+  if (timeline && timeline.events.length > 0) {
+    const orderedTeams = [...teamMap.entries()].sort((a, b) => a[0] - b[0]).map(([team, data]) => ({ team, ...data }));
+    const stats = computeTimelineStats(timeline, orderedTeams.map(t => t.score));
+    const topScore = Math.max(...orderedTeams.map(t => t.score));
+    const isDraw = orderedTeams.filter(t => t.score === topScore).length > 1;
+
+    const teamName = (teamIndex: number): string => {
+      const ids = orderedTeams[teamIndex]?.player_ids ?? [];
+      return ids.map(id => playerNameMap.get(id)).filter(Boolean).join(' & ');
+    };
+
+    // Comeback win
+    if (!isDraw) {
+      const loserScore = orderedTeams.find(t => t.score < topScore)?.score ?? 0;
+      for (let i = 0; i < orderedTeams.length; i++) {
+        const t = orderedTeams[i];
+        const tStats = stats.teams[i];
+        if (t.score !== topScore || !tStats || tStats.maxDeficit < 2) continue;
+        const hero = playerNameMap.get(t.player_ids[0]) ?? 'Someone';
+        facts.push({
+          type: 'comeback',
+          player_id: t.player_ids[0] ?? 0,
+          player_name: hero,
+          description: `${teamName(i)} came back from ${tStats.maxDeficit} down to win ${t.score}-${loserScore} — what a turnaround!`,
+          metadata: { max_deficit: tStats.maxDeficit, score: `${t.score}-${loserScore}` }
+        });
+        break; // one comeback story is enough
+      }
+
+      // Wire-to-wire: first point + never trailed
+      const wire = orderedTeams.find((t, i) => stats.wireToWireWinners.includes(i));
+      if (wire && stats.wireToWireWinners.length > 0) {
+        const wireIndex = orderedTeams.indexOf(wire);
+        facts.push({
+          type: 'first',
+          player_id: wire.player_ids[0] ?? 0,
+          player_name: playerNameMap.get(wire.player_ids[0]) ?? '',
+          description: `${teamName(wireIndex)} scored first and were never behind — a wire-to-wire win`,
+          metadata: { points: stats.pointCount }
+        });
+      }
+    }
+
+    // Lead changes
+    if (stats.leadChanges >= 3) {
+      facts.push({
+        type: 'trend',
+        player_id: 0,
+        player_name: '',
+        description: `The lead changed hands ${stats.leadChanges} times in that match — nobody let the other breathe`,
+        metadata: { lead_changes: stats.leadChanges }
+      });
+    }
+
+    // Duration + pace
+    if (stats.durationMs !== null) {
+      const minutes = stats.durationMs / 60000;
+      if (minutes >= 20) {
+        facts.push({
+          type: 'record',
+          player_id: 0,
+          player_name: '',
+          description: `That match ran for ${Math.round(minutes)} minutes and ${stats.pointCount} points — a marathon`,
+          metadata: { duration_ms: stats.durationMs, points: stats.pointCount }
+        });
+      } else if (minutes < 5 && stats.pointCount >= 10) {
+        facts.push({
+          type: 'offensive',
+          player_id: 0,
+          player_name: '',
+          description: `Blitz match: ${stats.pointCount} points in ${Math.round(minutes * 10) / 10} minutes — barely time to breathe`,
+          metadata: { duration_ms: stats.durationMs, points: stats.pointCount }
+        });
       }
     }
   }

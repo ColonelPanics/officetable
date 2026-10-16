@@ -10,10 +10,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { revalidatePath } from 'next/cache';
 import db from '@/lib/db';
-import { correctGambleScore, getGambleMatch } from '@/lib/gamble';
+import { correctGambleScore, getGambleMatch, getGambleParticipants } from '@/lib/gamble';
 import { announceCorrected } from '@/lib/gambleNotifications';
 import { isWithinEditWindow } from '@/lib/elo';
 import { gambleErrorResponse, requirePlayerId, requireSessionPlayer } from '@/lib/gambleApi';
+import { validatePointTimeline } from '@/lib/timeline';
 
 export async function POST(
   request: NextRequest,
@@ -54,7 +55,29 @@ export async function POST(
       }
     }
 
-    const summary = correctGambleScore(matchId, redScore, blueScore, body.notes);
+    // Optional corrected timeline (team indexes: 0 = red, 1 = blue).
+    // Explicit null drops the recorded timeline; omitted keeps/preserves the
+    // original (dropping it automatically when the corrected score no longer
+    // matches the recorded point counts — see correctGambleScore).
+    let timeline: Parameters<typeof correctGambleScore>[4] = undefined;
+    if (body.timeline !== undefined) {
+      if (body.timeline === null) {
+        timeline = null;
+      } else {
+        const roster = getGambleParticipants(matchId);
+        const teamsShape = [
+          { team: 0, player_ids: roster.filter(p => p.team === 0).map(p => p.player_id), score: redScore },
+          { team: 1, player_ids: roster.filter(p => p.team === 1).map(p => p.player_id), score: blueScore },
+        ];
+        const checked = validatePointTimeline(body.timeline, teamsShape, [redScore, blueScore]);
+        if (checked.error || !checked.timeline) {
+          return NextResponse.json({ error: checked.error ?? 'Invalid timeline' }, { status: 400 });
+        }
+        timeline = checked.timeline;
+      }
+    }
+
+    const summary = correctGambleScore(matchId, redScore, blueScore, body.notes, timeline);
 
     announceCorrected(gm, summary.previousScore, summary.finalScore)
       .catch(err => console.error('gamble correction announce failed:', err));

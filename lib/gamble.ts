@@ -26,6 +26,8 @@ import type {
   CorrectScoreSummary,
   SettleSummary,
 } from './types';
+import { parsePointTimeline } from './timeline';
+import type { PointTimeline } from './types';
 
 // Every tunable rule in one place — change here, never schema surgery.
 export const GAMBLE_RULES = {
@@ -937,7 +939,11 @@ export function getBetPool(gambleMatchId: number): number {
 export function settleGambleMatch(
   gambleMatchId: number,
   teams: { team: number; player_ids: number[]; score: number }[],
-  notes?: string
+  notes?: string,
+  /** Optional live-scorer timeline (validated by the calling API route) —
+   *  recorded with the settle's match, so live-tracked gambles keep their
+   *  point order + duration on the match report. */
+  timeline?: PointTimeline | null
 ): SettleSummary {
   const gm = getGambleMatch(gambleMatchId);
   if (!gm) throw new GambleError('Gamble match not found', 'not_found');
@@ -997,6 +1003,7 @@ export function settleGambleMatch(
         { team: 0, player_ids: [redPlayerId], score: redScore },
         { team: 1, player_ids: [bluePlayerId], score: blueScore },
       ],
+      timeline,
     }, new Date());
 
     // 2. Gamblers: correct-score picks are paid stake × frozen odds — but
@@ -1365,7 +1372,10 @@ export function correctGambleScore(
   gambleMatchId: number,
   redScore: number,
   blueScore: number,
-  notes?: string
+  notes?: string,
+  /** Optional corrected timeline (validated by the calling API route) —
+   *  replace/re-drop the recorded points' order with the corrected score. */
+  timeline?: PointTimeline | null
 ): CorrectScoreSummary {
   const gm = getGambleMatch(gambleMatchId);
   if (!gm) throw new GambleError('Gamble match not found', 'not_found');
@@ -1452,11 +1462,36 @@ export function correctGambleScore(
   //    target (already verified above) is used as-is.
   let newMatchId: number | null = targetMatchId;
   if (recordedStillExists && recordedScores) {
+    const redPlayerIds = roster.filter(p => p.team === 0).map(p => p.player_id);
+    const bluePlayerIds = roster.filter(p => p.team === 1).map(p => p.player_id);
+
+    // Timeline consistency guard: the preserved original timeline is only
+    // kept when the corrected score still matches the recorded point counts.
+    // Otherwise it would lie about the game's shape on the report (achievement
+    // re-checks read it too). Explicitly-supplied timelines are validated by
+    // the calling route; explicitly-null clears the timeline.
+    let correctedTimeline = timeline;
+    if (correctedTimeline === undefined) {
+      const existing = db.prepare('SELECT points_timeline FROM matches WHERE id = ?')
+        .get(gm.match_id) as { points_timeline: string | null } | undefined;
+      const parsed = parsePointTimeline(existing?.points_timeline);
+      if (parsed) {
+        const counts = [0, 0];
+        for (const ev of parsed.events) if (counts[ev.team] !== undefined) counts[ev.team]++;
+        if (counts[0] !== redScore || counts[1] !== blueScore) correctedTimeline = null;
+      } else if (existing?.points_timeline) {
+        correctedTimeline = null; // stored value isn't a valid timeline any more
+      }
+    } else if (correctedTimeline) {
+      // Re-index safety: timeline team indexes follow the recorded teams ARRAY
+      // (index 0 = red here) — same as the settle flow, so passthrough is safe.
+    }
+
     // Replay with the gamble's roster (team gambles: multiple ids per team).
     const oldToNew = correctMatch(gm.match_id, [
-      { team: 0, player_ids: roster.filter(p => p.team === 0).map(p => p.player_id), score: recordedScores.red },
-      { team: 1, player_ids: roster.filter(p => p.team === 1).map(p => p.player_id), score: recordedScores.blue },
-    ]);
+      { team: 0, player_ids: redPlayerIds, score: recordedScores.red },
+      { team: 1, player_ids: bluePlayerIds, score: recordedScores.blue },
+    ], correctedTimeline);
     newMatchId = oldToNew.get(gm.match_id) ?? null;
   }
 

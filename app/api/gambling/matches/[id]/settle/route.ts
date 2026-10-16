@@ -9,6 +9,7 @@ import { revalidatePath } from 'next/cache';
 import { settleGambleMatch, getGambleMatch, getGambleParticipants } from '@/lib/gamble';
 import { announceSettled } from '@/lib/gambleNotifications';
 import { gambleErrorResponse, requirePlayerId, requireSessionPlayer } from '@/lib/gambleApi';
+import { validatePointTimeline } from '@/lib/timeline';
 
 export async function POST(
   request: NextRequest,
@@ -45,10 +46,25 @@ export async function POST(
       return NextResponse.json({ error: 'Gamble match has no roster' }, { status: 400 });
     }
 
+    // Optional live-scorer timeline (team indexes: 0 = red, 1 = blue). The
+    // recorded points must sum to the entered final scores.
+    let timeline = null;
+    if (body.timeline !== undefined && body.timeline !== null) {
+      const teamsShape = [
+        { team: 0, player_ids: redPlayerIds, score: redScore },
+        { team: 1, player_ids: bluePlayerIds, score: blueScore },
+      ];
+      const checked = validatePointTimeline(body.timeline, teamsShape, [redScore, blueScore]);
+      if (checked.error || !checked.timeline) {
+        return NextResponse.json({ error: checked.error ?? 'Invalid timeline' }, { status: 400 });
+      }
+      timeline = checked.timeline;
+    }
+
     const summary = settleGambleMatch(matchId, [
       { team: 0, player_ids: redPlayerIds, score: redScore },
       { team: 1, player_ids: bluePlayerIds, score: blueScore },
-    ], body.notes ?? `gamble #${matchId}`);
+    ], body.notes ?? `gamble #${matchId}`, timeline);
 
     announceSettled(gm, summary).catch(err => console.error('gamble announce failed:', err));
 

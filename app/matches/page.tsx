@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useSelectedGame } from "@/lib/hooks/useSelectedGame";
 import { PlayerAvatar } from "@/components/PlayerAvatar";
+import { parsePointTimeline, computeTimelineStats, formatDuration } from "@/lib/timeline";
 
 interface Game {
   id: number;
@@ -39,6 +40,7 @@ interface Match {
   notes: string | null;
   is_edited?: number;
   edited_at?: string | null;
+  points_timeline?: string | null;
   game_name: string;
   participants: {
     id: number;
@@ -53,6 +55,17 @@ interface Match {
   }[];
   achievements?: MatchAchievement[];
   punditry?: PunditryFact[];
+}
+
+/** Estimated duration of a live-tracked match (null when not live-tracked). */
+function liveDurationMs(match: Match): number | null {
+  const tl = parsePointTimeline(match.points_timeline);
+  if (!tl || tl.events.length === 0) return null;
+  const teamSet = new Set(match.participants.map((p) => p.team));
+  const teamScores = Array.from(teamSet).sort((a, b) => a - b).map((team) =>
+    match.participants.filter((p) => p.team === team).reduce((sum, p) => sum + p.score, 0)
+  );
+  return computeTimelineStats(tl, teamScores).durationMs;
 }
 
 interface PaginationMeta {
@@ -512,6 +525,14 @@ function MatchesPageContent() {
                 <div className="flex justify-between items-center px-5 py-3 bg-gray-50 border-b border-gray-100">
                   <div className="flex items-center gap-3">
                     <span className="text-sm text-gray-500">{formatDate(match.played_at)}</span>
+                    {liveDurationMs(match) !== null && (
+                      <span
+                        className="text-xs px-2 py-0.5 bg-gray-100 text-gray-500 rounded-full font-mono"
+                        title="Live-tracked duration"
+                      >
+                        ⏱ {formatDuration(liveDurationMs(match)!)}
+                      </span>
+                    )}
                     {match.is_edited === 1 && (
                       <span className="text-xs px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full font-medium">
                         ✏️ Edited

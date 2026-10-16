@@ -118,6 +118,15 @@ try {
   // Column already exists, ignore
 }
 
+// Migration: matches gain a point timeline column — the ordered point
+// sequence recorded by the live scorer (see lib/timeline.ts). Stored as JSON
+// text: { start, end, events: [{ team, at }] }. NULL = not live-recorded.
+try {
+  db.exec(`ALTER TABLE matches ADD COLUMN points_timeline TEXT`);
+} catch (e) {
+  // Column already exists, ignore
+}
+
 // Migration: Add elo column to player_ratings if it doesn't exist (old schema had mu/sigma)
 try {
   db.exec(`ALTER TABLE player_ratings ADD COLUMN elo REAL DEFAULT 0`);
@@ -296,7 +305,10 @@ const seedAchievements = db.prepare(`
     ('codependent', 'Play the same opponent 5 times in a row', 'streak', '🧲'),
     ('revenge_tour', 'Lose to someone, then beat them in a rematch that same day', 'special', '💣'),
     ('agreeable', 'Draw 3 games in a row', 'streak', '🕊️'),
-    ('streak_breaker', 'End someone''s 5 or more game winning streak', 'streak', '🛑')
+    ('streak_breaker', 'End someone''s 5 or more game winning streak', 'streak', '🛑'),
+    ('wire_to_wire', 'Score the first point and never trail in a live-tracked match', 'special', '🛡️'),
+    ('comeback_kid', 'Trail by 2 or more points and still win a live-tracked match', 'special', '🔄'),
+    ('marathon', 'Win a live-tracked match that lasted 20 minutes or more', 'special', '⏱️')
 `);
 seedAchievements.run();
 
@@ -506,6 +518,9 @@ const updateAchievementIcons = db.prepare(`
     WHEN 'revenge_tour' THEN '💣'
     WHEN 'agreeable' THEN '🕊️'
     WHEN 'streak_breaker' THEN '🛑'
+    WHEN 'wire_to_wire' THEN '🛡️'
+    WHEN 'comeback_kid' THEN '🔄'
+    WHEN 'marathon' THEN '⏱️'
     ELSE icon
   END
   WHERE icon IS NULL OR icon = ''

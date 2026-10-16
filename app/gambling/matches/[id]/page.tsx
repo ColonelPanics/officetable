@@ -344,38 +344,67 @@ export default function GambleMatchPage() {
                 <div className="text-sm text-gray-500">Bets are closed for this match.</div>
               )}
 
-              {/* Score entry for participants */}
+              {/* Result recording: participants record like any other match,
+                  and a matching record from either side ATTACHES this bet and
+                  settles it. The manual form stays for team gambles (the
+                  leaderboard's auto-attach is 1v1) and as a fallback. */}
               {detail.can_score && (
                 <div className="border-t border-gray-200 pt-3 space-y-2">
-                  <div className="text-sm font-semibold text-gray-800">Enter the final score</div>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number" min={0} max={gm.outcome_total} value={scoreRed}
-                      onChange={e => setScoreRed(parseInt(e.target.value, 10) || 0)}
-                      className="w-16 px-2 py-1.5 rounded-lg border border-gray-200 bg-background text-center text-red-600 font-bold"
-                      aria-label="Red score"
-                    />
-                    <span className="text-gray-400">–</span>
-                    <input
-                      type="number" min={0} max={gm.outcome_total} value={scoreBlue}
-                      onChange={e => setScoreBlue(parseInt(e.target.value, 10) || 0)}
-                      className="w-16 px-2 py-1.5 rounded-lg border border-gray-200 bg-background text-center text-blue-600 font-bold"
-                      aria-label="Blue score"
-                    />
-                    <span className={`text-xs ${scoreRed + scoreBlue === gm.outcome_total ? 'text-green-600' : 'text-red-500'}`}>
-                      = {scoreRed + scoreBlue} / {gm.outcome_total}
-                    </span>
+                  <div className="text-sm font-semibold text-gray-800">Record the result</div>
+                  <div className="text-xs text-gray-500">
+                    Record this match like any other — when a result from either side
+                    matches this gamble, it attaches and settles automatically.
                   </div>
-                  <button
-                    onClick={enterScore}
-                    disabled={busy || scoreRed + scoreBlue !== gm.outcome_total}
-                    className="w-full font-semibold bg-primary text-white rounded-lg px-4 py-2 hover:bg-primary-hover disabled:opacity-40"
-                  >
-                    Record result & settle
-                  </button>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Link
+                      href={`/matches/live?game=${gm.game_id}`}
+                      className="text-center text-sm font-semibold bg-red-600 text-white rounded-lg px-3 py-2 hover:bg-red-700 transition-colors"
+                    >
+                      🔴 Track live
+                    </Link>
+                    <Link
+                      href={`/matches/new?game=${gm.game_id}`}
+                      className="text-center text-sm font-semibold bg-primary text-white rounded-lg px-3 py-2 hover:bg-primary-hover transition-colors"
+                    >
+                      📝 Record score
+                    </Link>
+                  </div>
+                  <details className="text-gray-600">
+                    <summary className="text-xs cursor-pointer select-none hover:text-gray-800">
+                      or enter the score manually
+                    </summary>
+                    <div className="mt-2 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number" min={0} max={gm.outcome_total} value={scoreRed}
+                          onChange={e => setScoreRed(parseInt(e.target.value, 10) || 0)}
+                          className="w-16 px-2 py-1.5 rounded-lg border border-gray-200 bg-background text-center text-red-600 font-bold"
+                          aria-label="Red score"
+                        />
+                        <span className="text-gray-400">–</span>
+                        <input
+                          type="number" min={0} max={gm.outcome_total} value={scoreBlue}
+                          onChange={e => setScoreBlue(parseInt(e.target.value, 10) || 0)}
+                          className="w-16 px-2 py-1.5 rounded-lg border border-gray-200 bg-background text-center text-blue-600 font-bold"
+                          aria-label="Blue score"
+                        />
+                        <span className={`text-xs ${scoreRed + scoreBlue === gm.outcome_total ? 'text-green-600' : 'text-red-500'}`}>
+                          = {scoreRed + scoreBlue} / {gm.outcome_total}
+                        </span>
+                      </div>
+                      <button
+                        onClick={enterScore}
+                        disabled={busy || scoreRed + scoreBlue !== gm.outcome_total}
+                        className="w-full font-semibold bg-primary text-white rounded-lg px-4 py-2 hover:bg-primary-hover disabled:opacity-40"
+                      >
+                        Record result & settle
+                      </button>
+                    </div>
+                  </details>
                   <p className="text-[11px] text-gray-400">
-                    Settles every bet, splits entries by score against the evens line after the 10% house fee,
-                    and divides whatever's left in the pot 50% house / 25% to the winner / 25% by score.
+                    Settling pays every bet, splits entries by score against the evens line after the 10% house fee,
+                    and whatever remains in the pot splits 50% house / 25% to the winner / 25% by score. Team gambles
+                    with more than one player per side settle through the manual form.
                   </p>
                 </div>
               )}

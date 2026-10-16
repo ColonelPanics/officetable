@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { PlayerAvatar } from "@/components/PlayerAvatar";
+import { parsePointTimeline, computeTimelineStats, formatDuration, formatClock, type PointTimeline, type TimelineStats } from "@/lib/timeline";
 
 interface MatchAchievement {
   achievement_id: number;
@@ -29,6 +30,7 @@ interface Match {
   notes: string | null;
   is_edited?: number;
   edited_at?: string | null;
+  points_timeline?: string | null;
   game_name: string;
   game_image_url?: string | null;
   participants: {
@@ -84,6 +86,171 @@ function getPunditryStyle(type: string): { bg: string; border: string; iconBg: s
     'consistency': { bg: 'from-emerald-50 to-teal-50', border: 'border-emerald-200', iconBg: 'bg-emerald-100' },
   };
   return styles[type] || { bg: 'from-gray-50 to-slate-50', border: 'border-gray-200', iconBg: 'bg-gray-100' };
+}
+
+// A match summary for live-tracked games: cumulative score over time
+//(both teams), plus scoring stats and the ordered point list.
+function TimelineCard({
+  timeline,
+  stats,
+  teamNames,
+}: {
+  timeline: PointTimeline;
+  stats: TimelineStats;
+  teamNames: string[];
+}) {
+  const events = timeline.events;
+  const teamCount = Math.max(teamNames.length, (stats.scores.size ?? 0));
+  const W = 360;
+  const H = 170;
+  const padX = 34;
+  const padRight = 16;
+  const padTop = 14;
+  const padBottom = 26;
+  const lastAt = events[events.length - 1]?.at ?? 1;
+  const totalX = Math.max(stats.durationMs ?? 0, lastAt) || 1;
+  const maxScore = Math.max(1, ...stats.teams.map((t) => t.score));
+  const colors = ['#2563eb', '#dc2626', '#059669', '#7c3aed'];
+
+  const x = (at: number) => padX + (at / totalX) * (W - padX - padRight);
+  const y = (score: number) => H - padBottom - (score / maxScore) * (H - padTop - padBottom);
+
+  // Piecewise-constant step series per team: (0,0) -> each point -> (end, final)
+  const series = Array.from({ length: teamCount }, (_, t) => {
+    let cum = 0;
+    const pts: [number, number][] = [[x(0), y(0)]];
+    for (const ev of events) {
+      if (ev.team !== t) continue;
+      cum++;
+      pts.push([x(ev.at), y(cum)]);
+    }
+    if (cum === 0) return null;
+    pts.push([x(totalX), y(cum)]);
+    return { t, cum, pts };
+  }).filter((s): s is { t: number; cum: number; pts: [number, number][] } => s !== null);
+
+  const teamNameOf = (t: number) =>
+    teamNames[t] ?? `Team ${t + 1}`;
+
+  return (
+    <div className="bg-card rounded-2xl shadow-lg overflow-hidden mb-6">
+      <div className="px-6 py-4 bg-gradient-to-r from-slate-800 to-slate-900 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <span className="text-2xl">⏱️</span>
+          <div>
+            <div className="text-lg font-bold text-white">Match Timeline</div>
+            <div className="text-sm text-slate-400">Live-tracked points as they were scored</div>
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="text-sm text-slate-300 font-mono">
+            {stats.durationMs ? formatDuration(stats.durationMs) : '—'}
+          </div>
+          <div className="text-xs text-slate-500">{stats.pointCount} points</div>
+        </div>
+      </div>
+
+      <div className="px-6 py-4 border-b border-gray-100 flex flex-wrap gap-2">
+        {stats.firstScorer !== null && (
+          <span className="text-xs px-2.5 py-1 rounded-full bg-gray-100 text-gray-600">
+            First point: {teamNameOf(stats.firstScorer)}
+          </span>
+        )}
+        {stats.leadChanges > 0 && (
+          <span className="text-xs px-2.5 py-1 rounded-full bg-gray-100 text-gray-600">
+            🔀 {stats.leadChanges} lead change{stats.leadChanges === 1 ? '' : 's'}
+          </span>
+        )}
+        {stats.teams.filter((t) => t.maxDeficit >= 2).map((t) => (
+          <span key={t.team} className="text-xs px-2.5 py-1 rounded-full bg-amber-50 border border-amber-200 text-amber-700">
+            {teamNameOf(t.team)} were {t.maxDeficit} down at worst
+          </span>
+        ))}
+        {stats.wireToWireWinners.length > 0 && (
+          <span className="text-xs px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700">
+            🛡️ Wire-to-wire: {stats.wireToWireWinners.map(teamNameOf).join(' & ')}
+          </span>
+        )}
+      </div>
+
+      {/* Cumulative score chart */}
+      <div className="px-6 pt-5 pb-2">
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Cumulative score over time">
+          {/* score gridlines */}
+          {Array.from({ length: maxScore }, (_, i) => i + 1).map((s) => (
+            <g key={s}>
+              <line x1={padX} y1={y(s)} x2={W - padRight} y2={y(s)} stroke="#e5e7eb" strokeWidth={1} strokeDasharray="3 4" />
+              <text x={padX - 6} y={y(s) + 3.5} textAnchor="end" fontSize={10} fill="#9ca3af" fontFamily="monospace">
+                {s}
+              </text>
+            </g>
+          ))}
+          {/* time axis */}
+          <line x1={padX} y1={y(0)} x2={W - padRight} y2={y(0)} stroke="#d1d5db" strokeWidth={1} />
+          <text x={padX} y={y(0) + 14} textAnchor="middle" fontSize={10} fill="#9ca3af" fontFamily="monospace">00:00</text>
+          <text x={W - padRight} y={y(0) + 14} textAnchor="end" fontSize={10} fill="#9ca3af" fontFamily="monospace">
+            {stats.durationMs ? formatClock(stats.durationMs) : formatClock(lastAt)}
+          </text>
+          {/* team series */}
+          {series.map((s) => (
+            <g key={s.t}>
+              <polyline
+                points={s.pts.map(([px, py]) => `${px.toFixed(1)},${py.toFixed(1)}`).join(' ')}
+                fill="none"
+                stroke={colors[s.t % colors.length]}
+                strokeWidth={2.5}
+                strokeLinejoin="round"
+              />
+              {s.pts.slice(1, -1).map(([px, py], i) => (
+                <circle key={i} cx={px} cy={py} r={2.5} fill={colors[s.t % colors.length]} opacity={0.55} />
+              ))}
+              <text x={W - padRight + 2} y={y(s.cum) + 3.5} fontSize={10} fill={colors[s.t % colors.length]} fontFamily="monospace">
+                {s.cum}
+              </text>
+            </g>
+          ))}
+        </svg>
+        <div className="flex justify-center gap-4 pb-2">
+          {series.map((s) => (
+            <span key={s.t} className="flex items-center gap-1.5 text-xs text-gray-600">
+                <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ backgroundColor: colors[s.t % colors.length] }} />
+                {teamNameOf(s.t)}
+              </span>
+          ))}
+        </div>
+      </div>
+
+      {/* Point order */}
+      <div className="border-t border-gray-100">
+        <div className="px-6 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+          Scoring order
+        </div>
+        <div className="px-6 pb-5 max-h-64 overflow-y-auto grid grid-cols-2 sm:grid-cols-3 gap-2">
+          {events.map((ev, i) => {
+            const running = [0, 0];
+            for (let j = 0; j <= i; j++) running[events[j].team]++;
+            return (
+              <div key={i} className="flex items-center justify-between bg-gray-50 rounded-lg px-2.5 py-1.5">
+                <span className="flex items-center gap-1.5 min-w-0">
+                  <span
+                    className="w-2 h-2 rounded-full shrink-0 inline-block"
+                    style={{ backgroundColor: colors[ev.team % colors.length] }}
+                  />
+                  <span className="text-[10px] text-gray-400 font-mono">{formatClock(ev.at)}</span>
+                  <span className="text-xs font-medium truncate" style={{ color: colors[ev.team % colors.length] }}>
+                    #{i + 1}
+                  </span>
+                </span>
+                <span className="text-xs font-mono text-gray-500 tabular-nums shrink-0">
+                  {running[0]}-{running[1]}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export default function MatchDetailsPage() {
@@ -164,6 +331,19 @@ export default function MatchDetailsPage() {
     return Array.from(teamSet).sort((a, b) => a - b);
   };
 
+  // Live-scorer timeline + derived stats (matches recorded with the live
+  // scorer only — see /matches/live). Team labels 0/1/... match the timeline
+  // team indexes (the recorder stores team labels 0..n-1).
+  const timeline = useMemo(() => parsePointTimeline(match?.points_timeline), [match]);
+  const timelineStats = useMemo(() => {
+    if (!timeline || !match) return null;
+    const teamSet = new Set(match.participants.map((p) => p.team));
+    const teamScores = Array.from(teamSet).sort((a, b) => a - b).map((team) =>
+      match.participants.filter((p) => p.team === team).reduce((sum, p) => sum + p.score, 0)
+    );
+    return computeTimelineStats(timeline, teamScores);
+  }, [timeline, match]);
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-64">
@@ -226,8 +406,13 @@ export default function MatchDetailsPage() {
                 <h1 className="text-2xl font-bold text-white">
                   {match.game_name.charAt(0).toUpperCase() + match.game_name.slice(1).replace("-", " ")}
                 </h1>
-                <div className="flex items-center gap-3 mt-1 text-slate-400">
+                <div className="flex items-center gap-3 mt-1 text-slate-400 flex-wrap">
                   <span>{formatDate(match.played_at)}</span>
+                  {timelineStats?.durationMs && (
+                    <span className="text-xs px-2 py-0.5 bg-slate-700/60 text-slate-200 rounded-full border border-slate-600 font-mono">
+                      ⏱ {formatDuration(timelineStats.durationMs)}
+                    </span>
+                  )}
                   {match.is_edited === 1 && (
                     <span className="text-xs px-2 py-0.5 bg-yellow-500/20 text-yellow-300 rounded-full border border-yellow-500/30">
                       Edited
@@ -377,6 +562,19 @@ export default function MatchDetailsPage() {
           })}
         </div>
       </div>
+
+      {/* Live Timeline (matches recorded with the live scorer) */}
+      {timeline && timelineStats && timelineStats.pointCount > 0 && (
+        <TimelineCard
+          timeline={timeline}
+          stats={timelineStats}
+          teamNames={teams.map((team) => {
+            const teamParticipants = match.participants.filter((p) => p.team === team);
+            const names = teamParticipants.map((p) => p.player_name);
+            return names.length === 1 ? names[0] : `${names[0]} & ${names.length - 1} more`;
+          })}
+        />
+      )}
 
       {/* Notes */}
       {match.notes && (

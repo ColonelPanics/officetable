@@ -6,10 +6,11 @@ import { sendGoogleChatNotification, buildMatchNotification } from '@/lib/notifi
 import { getAchievementsForMatch } from '@/lib/achievements';
 import { getPunditryForMatch } from '@/lib/punditry';
 import { resolveScopeSeasonId, getCurrentSeason } from '@/lib/seasons';
-import { syncStatuses, settleGambleMatch, getGambleMatch } from '@/lib/gamble';
+import { syncStatuses, settleGambleMatch, getGambleMatch, GambleError } from '@/lib/gamble';
 import { announceSettled } from '@/lib/gambleNotifications';
 import { requirePlayerId } from '@/lib/gambleApi';
 import { readSessionPlayer } from '@/lib/session';
+import { validatePointTimeline } from '@/lib/timeline';
 import type { MatchWithParticipants, CreateMatchInput, MatchFilters, PaginationMeta } from '@/lib/types';
 
 export async function GET(request: NextRequest) {
@@ -188,7 +189,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { game_id, notes, teams } = body as CreateMatchInput;
+    const { game_id, notes, teams, timeline: rawTimeline } = body as CreateMatchInput & { timeline?: unknown };
 
     if (!game_id || !teams || teams.length < 2) {
       return NextResponse.json(
@@ -205,6 +206,20 @@ export async function POST(request: NextRequest) {
           { status: 400 }
         );
       }
+    }
+
+    // Live-scorer timeline (optional): validate shape + that the recorded
+    // points actually add up to the final scores being stored.
+    let timeline = null;
+    if (rawTimeline !== undefined && rawTimeline !== null) {
+      const checked = validatePointTimeline(rawTimeline, teams, teams.map(t => t.score));
+      if (checked.error || !checked.timeline) {
+        return NextResponse.json(
+          { error: checked.error ?? 'Invalid timeline' },
+          { status: 400 }
+        );
+      }
+      timeline = checked.timeline;
     }
 
     // Gamble settle hook: a 1v1 record whose two participants match an open
@@ -268,11 +283,29 @@ export async function POST(request: NextRequest) {
         const [redTeam, blueTeam] = teams[0].player_ids[0] === gmRow.red_player_id
           ? [teams[0], teams[1]]
           : [teams[1], teams[0]];
-        const summary = settleGambleMatch(gmRow.id, [redTeam, blueTeam], notes);
+        let summary;
+        try {
+          summary = settleGambleMatch(gmRow.id, [redTeam, blueTeam], notes, timeline);
+        } catch (e) {
+          // Gamble-side rejections (bets still open, teams mismatch…) surface
+          // as their own message — a plain "failed to create match" would
+          // confuse the live scorer / recorder who don't know gamble is
+          // attached to this game pair.
+          if (e instanceof GambleError) {
+            return NextResponse.json(
+              { error: e.message, code: e.code, gamble_match_id: gmRow.id },
+              { status: 409 }
+            );
+          }
+          throw e;
+        }
         const gmFull = getGambleMatch(gmRow.id)!;
         announceSettled(gmFull, summary).catch(err => console.error('gamble announce failed:', err));
         revalidatePath('/', 'layout');
-        return NextResponse.json({ success: true, gamble_match_id: gmRow.id, summary }, { status: 201 });
+        // match_id returned so the live scorer routes to the match report it
+        // just generated (the bet attach itself is invisible from the
+        // recorder's side — it's just a normal match record to them).
+        return NextResponse.json({ success: true, gamble_match_id: gmRow.id, match_id: summary.matchId, summary }, { status: 201 });
       }
     }
 
@@ -345,7 +378,7 @@ export async function POST(request: NextRequest) {
     const rankBefore = toRankMap(fetchRankings());
 
     // Process match and get skill changes
-    const result = processMatch({ game_id, notes, teams });
+    const result = processMatch({ game_id, notes, teams, timeline });
 
     // Get rankings AFTER the match
     const rankAfter = toRankMap(fetchRankings());
@@ -403,7 +436,9 @@ export async function POST(request: NextRequest) {
     // Revalidate the home page to show new data
     revalidatePath('/', 'layout');
 
-    return NextResponse.json({ success: true }, { status: 201 });
+    // match_id is returned so the live scorer can hand users straight to the
+    // match report it just generated.
+    return NextResponse.json({ success: true, match_id: result.matchId }, { status: 201 });
   } catch (error) {
     console.error('Error creating match:', error);
     return NextResponse.json({ error: 'Failed to create match' }, { status: 500 });

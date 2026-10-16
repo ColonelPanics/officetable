@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useMemo, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
 import { useSelectedGame } from "@/lib/hooks/useSelectedGame";
 import { PlayerAvatar } from "@/components/PlayerAvatar";
 
@@ -222,6 +223,16 @@ function NewMatchContent() {
               : `First to ${selectedGameData.score_value} points`}
           </p>
         )}
+        <p className="text-sm text-gray-400 mt-2">
+          Playing right now?{' '}
+          <Link
+            href={selectedGameId ? `/matches/live?game=${selectedGameId}` : '/matches/live'}
+            className="text-red-600 hover:underline font-medium"
+          >
+            🔴 Track the match live
+          </Link>{' '}
+          for the scoring order, duration and comeback achievements.
+        </p>
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-6">

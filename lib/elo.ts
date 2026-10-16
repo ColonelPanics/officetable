@@ -1,7 +1,8 @@
 import db from './db';
-import type { PlayerRating, LeaderboardEntry, CreateMatchInput } from './types';
+import type { PlayerRating, LeaderboardEntry, CreateMatchInput, PointTimeline } from './types';
 import { checkAchievements, saveAchievements, deleteAchievementsForMatch, deleteAchievementsForMatches } from './achievements';
 import { resolveSeason, ALLTIME_SEASON_ID } from './seasons';
+import { parsePointTimeline } from './timeline';
 
 // Elo constants
 const DEFAULT_ELO = 0;
@@ -177,6 +178,10 @@ export interface ProcessedMatch {
  */
 export function processMatch(input: CreateMatchInput, matchTimestamp?: Date): ProcessedMatch {
   const { game_id, notes, teams } = input;
+  // Optional live-scorer timeline (validated by the API layer) — stored with
+  // the match and fed to achievement checks (wire_to_wire / comeback_kid /
+  // marathon are only earnable with one).
+  const timeline: PointTimeline | null = input.timeline ?? null;
   const matchDate = matchTimestamp || new Date();
   // Season is resolved from played_at, not insert date — late-entered
   // matches slot into the correct season.
@@ -201,13 +206,17 @@ export function processMatch(input: CreateMatchInput, matchTimestamp?: Date): Pr
   const alltimeRatingChanges = computeTeamRatingChanges(teams, alltimeRatingsByPlayer, results);
 
   const insertMatch = db.prepare(`
-    INSERT INTO matches (game_id, notes, played_at, season_id) VALUES (?, ?, ?, ?)
+    INSERT INTO matches (game_id, notes, played_at, season_id, points_timeline) VALUES (?, ?, ?, ?, ?)
   `);
 
   const insertParticipant = db.prepare(`
     INSERT INTO match_participants (match_id, player_id, team, score, elo_before, elo_after, alltime_elo_before, alltime_elo_after)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
+
+  // Timeline rows are keyed to teams ARRAY INDEX (not the team label) so the
+  // live scorer's local team numbering always lines up with the stored layout.
+  const timelineJson = timeline ? JSON.stringify(timeline) : null;
 
   // Store skill changes for return
   const skillChanges: Map<number, { before: number; after: number; change: number }> = new Map();
@@ -220,7 +229,7 @@ export function processMatch(input: CreateMatchInput, matchTimestamp?: Date): Pr
   const updateRatings = db.transaction(() => {
     // Create match record with timestamp
     const playedAt = playedAtDb;
-    const matchResult = insertMatch.run(game_id, notes || null, playedAt, seasonId);
+    const matchResult = insertMatch.run(game_id, notes || null, playedAt, seasonId, timelineJson);
     matchId = matchResult.lastInsertRowid as number;
 
     // Update each team's players in both ledgers
@@ -283,7 +292,8 @@ export function processMatch(input: CreateMatchInput, matchTimestamp?: Date): Pr
     playedAtDb,
     teams,
     participants,
-    playerNameMap
+    playerNameMap,
+    timeline
   });
 
   // Save achievements. earned_at is stamped from the match's own timestamp;
@@ -306,6 +316,8 @@ interface ReplayableMatch {
   /** Original played_at string (preserved verbatim). */
   timestamp: string;
   notes: string | null;
+  /** Live-scorer timeline preserved verbatim through replays. */
+  pointsTimeline: string | null;
 }
 
 /**
@@ -406,7 +418,7 @@ function replayCore(ctx: ReplayContext): Map<number, number> {
   const deleteParticipantsForMatch = db.prepare(`DELETE FROM match_participants WHERE match_id = ?`);
   const deleteMatch = db.prepare(`DELETE FROM matches WHERE id = ?`);
   const insertMatch = db.prepare(`
-    INSERT INTO matches (game_id, notes, played_at, season_id) VALUES (?, ?, ?, ?)
+    INSERT INTO matches (game_id, notes, played_at, season_id, points_timeline) VALUES (?, ?, ?, ?, ?)
   `);
   const insertParticipant = db.prepare(`
     INSERT INTO match_participants (match_id, player_id, team, score, elo_before, elo_after, alltime_elo_before, alltime_elo_after)
@@ -455,7 +467,7 @@ function replayCore(ctx: ReplayContext): Map<number, number> {
       const alltimeChanges = computeTeamRatingChanges(matchData.teams, alltimeRatingsByPlayer, results);
 
       const playedAt = normalisePlayedAt(matchData.timestamp);
-      const result = insertMatch.run(gameId, matchData.notes ?? null, playedAt, matchSeason);
+      const result = insertMatch.run(gameId, matchData.notes ?? null, playedAt, matchSeason, matchData.pointsTimeline);
       const newMatchId = result.lastInsertRowid as number;
       oldToNewMatchIds.set(matchData.matchId, newMatchId);
 
@@ -541,7 +553,8 @@ function recheckAchievementsForReplay(
       playedAtDb: normalisePlayedAt(matchData.timestamp),
       teams: matchData.teams,
       participants,
-      playerNameMap: playerNameMapFor(participants.map(p => p.player_id))
+      playerNameMap: playerNameMapFor(participants.map(p => p.player_id)),
+      timeline: parsePointTimeline(matchData.pointsTimeline)
     });
 
     if (achievementResults.length > 0) {
@@ -559,11 +572,12 @@ function recheckAchievementsForReplay(
  */
 export function correctMatch(
   matchId: number,
-  newTeams: { team: number; player_ids: number[]; score: number }[]
+  newTeams: { team: number; player_ids: number[]; score: number }[],
+  newTimeline?: PointTimeline | null
 ): Map<number, number> {
   const originalMatch = db.prepare(`
     SELECT * FROM matches WHERE id = ?
-  `).get(matchId) as { id: number; game_id: number; played_at: string; notes: string | null; season_id: number } | undefined;
+  `).get(matchId) as { id: number; game_id: number; played_at: string; notes: string | null; season_id: number; points_timeline: string | null } | undefined;
 
   if (!originalMatch) {
     throw new Error('Match not found');
@@ -574,12 +588,13 @@ export function correctMatch(
   const anchorSeason = resolveSeason(anchorTimestamp);
 
   // All matches for this game from the correction point forward,
-  // in deterministic chronological order.
+  // in deterministic chronological order. The timeline column travels so
+  // live-tracked matches keep their point order after corrections.
   const matchesFromAnchor = db.prepare(`
-    SELECT id, played_at, notes FROM matches
+    SELECT id, played_at, notes, points_timeline FROM matches
     WHERE game_id = ? AND (played_at > ? OR (played_at = ? AND id >= ?))
     ORDER BY played_at ASC, id ASC
-  `).all(gameId, anchorTimestamp, anchorTimestamp, matchId) as { id: number; played_at: string; notes: string | null }[];
+  `).all(gameId, anchorTimestamp, anchorTimestamp, matchId) as { id: number; played_at: string; notes: string | null; points_timeline: string | null }[];
 
   // Collect all players involved in the replay + the new line-up
   const playerIds = new Set<number>();
@@ -597,11 +612,20 @@ export function correctMatch(
 
   // Build the replay list: the corrected match first, then the originals
   const matchesToReplay: ReplayableMatch[] = [];
+  // The corrected match's timeline: a freshly supplied one (validated by the
+  // API layer) when given, otherwise the original is preserved. Explicitly
+  // null clears it.
+  const correctedTimeline = newTimeline === undefined
+    ? originalMatch.points_timeline
+    : newTimeline
+      ? JSON.stringify(newTimeline)
+      : null;
   matchesToReplay.push({
     matchId,
     teams: newTeams,
     timestamp: anchorTimestamp,
-    notes: originalMatch.notes
+    notes: originalMatch.notes,
+    pointsTimeline: correctedTimeline
   });
 
   const getParticipantsStmt = db.prepare(`
@@ -626,7 +650,8 @@ export function correctMatch(
       matchId: m.id,
       teams,
       timestamp: m.played_at,
-      notes: m.notes
+      notes: m.notes,
+      pointsTimeline: m.points_timeline ?? null
     });
   }
 
@@ -684,10 +709,10 @@ export function deleteMatchAndReplay(matchId: number): void {
 
   // Subsequent matches in deterministic chronological order
   const subsequentMatches = db.prepare(`
-    SELECT id, played_at, notes FROM matches
+    SELECT id, played_at, notes, points_timeline FROM matches
     WHERE game_id = ? AND (played_at > ? OR (played_at = ? AND id > ?))
     ORDER BY played_at ASC, id ASC
-  `).all(gameId, anchorTimestamp, anchorTimestamp, matchId) as { id: number; played_at: string; notes: string | null }[];
+  `).all(gameId, anchorTimestamp, anchorTimestamp, matchId) as { id: number; played_at: string; notes: string | null; points_timeline: string | null }[];
 
   // Fast path: nothing to replay — just reverse this match's deltas in both ledgers.
   if (subsequentMatches.length === 0) {
@@ -743,7 +768,8 @@ export function deleteMatchAndReplay(matchId: number): void {
       matchId: m.id,
       teams,
       timestamp: m.played_at,
-      notes: m.notes
+      notes: m.notes,
+      pointsTimeline: m.points_timeline ?? null
     });
   }
 
