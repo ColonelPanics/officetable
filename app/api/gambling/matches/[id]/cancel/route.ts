@@ -4,7 +4,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { revalidatePath } from 'next/cache';
-import { cancelGambleMatch, getGambleMatch, getBetPool } from '@/lib/gamble';
+import { cancelGambleMatch, getGambleMatch, getBetPool, getGambleParticipants } from '@/lib/gamble';
 import { announceCancelled } from '@/lib/gambleNotifications';
 import { gambleErrorResponse, requirePlayerId, requireSessionPlayer } from '@/lib/gambleApi';
 
@@ -25,11 +25,12 @@ export async function POST(
 
     const gm = getGambleMatch(matchId);
     if (!gm) return NextResponse.json({ error: 'Gamble match not found' }, { status: 404 });
-    if (playerId !== gm.red_player_id && playerId !== gm.blue_player_id) {
-      return NextResponse.json({ error: 'Only the two players may cancel the gamble' }, { status: 403 });
+    const roster = getGambleParticipants(matchId);
+    if (!roster.some(p => p.player_id === playerId)) {
+      return NextResponse.json({ error: 'Only a player in the gamble may cancel it' }, { status: 403 });
     }
 
-    const refundTotal = 2 * gm.entry_fee + getBetPool(matchId);
+    const refundTotal = gm.entry_fee * roster.length + getBetPool(matchId);
     cancelGambleMatch(matchId);
 
     announceCancelled(gm, refundTotal).catch(err => console.error('gamble announce failed:', err));

@@ -9,9 +9,9 @@
 // Runs in seconds, no real waiting.
 import db from '../lib/db';
 import {
-  createChallenge, respondToChallenge, placeBet, settleGambleMatch,
-  cancelGambleMatch, getBets, getChallenge, getGambleMatch, getBetPool, GAMBLE_RULES,
-  syncStatuses,
+  createChallenge, createTeamChallenge, respondToChallenge, placeBet, settleGambleMatch,
+  cancelGambleMatch, getBets, getChallenge, getChallengeSlots, getGambleMatch, getGambleParticipants,
+  getBetPool, getSettleSummary, GAMBLE_RULES, syncStatuses,
 } from '../lib/gamble';
 import type { GambleError } from '../lib/gamble';
 import { getBank } from '../lib/bank';
@@ -149,8 +149,8 @@ async function main() {
     'entries: 90 split 63/27 by score share (house fee off the top first)');
   assert(summary.leftover < 0 && summary.pot.houseLoss === -summary.leftover,
     `house covers shortfall exactly incl. fees (${summary.pot.houseLoss})`);
-  assert(summary.entryEvenHit === false && summary.payoutLine === 'true_even',
-    'plain challenge: no evens line, split stayed by score');
+  assert(summary.entryEvenHit === false && summary.payoutLine === 'elo_even',
+    'plain challenge defaults to evens on the bookie\'s line (elo_even) — 7-3 misses it, split by score');
 
   // double settle blocked via CAS
   blocked = false;
@@ -296,10 +296,10 @@ async function main() {
   const preRedH = bank.getBalance(redId);
   const preBlueH = bank.getBalance(blueId);
   const preG1H = bank.getBalance(g1);
-  // Overdue: results not in by 15 min after the deadline — backdate past the
-  // overdue window (this skips the settled path entirely) and sync.
+  // Overdue: results not in by 120 min after the deadline — backdate past
+  // the overdue window (GAMBLE_RULES.resultDeadlineMinutes) and sync.
   db.prepare(`UPDATE gamble_matches
-    SET scheduled_at = datetime('now','-16 minutes'), bet_close_at = datetime('now','-18 minutes')
+    SET scheduled_at = datetime('now','-125 minutes'), bet_close_at = datetime('now','-127 minutes')
     WHERE id = ?`).run(gmH.id);
   syncStatuses();
   assert(getGambleMatch(gmH.id)!.status === 'cancelled', 'overdue gamble auto-cancels 15 min past deadline');
@@ -308,9 +308,162 @@ async function main() {
     'auto-cancel: both entry fees refunded');
   assert(bank.getBalance(g1) === preG1H + stakeH, 'auto-cancel refunds open stakes');
 
+  // ============ TEAM gambles: slots, broadcast seats, 1v2s, 2v2s ==========
+  const teamNames = ['SmokeTeamMate', 'SmokeBlueB1', 'SmokeBlueB2'];
+  const teamIds = teamNames.map(n => {
+    const row = db.prepare(`SELECT id FROM players WHERE name = ?`).get(n) as { id: number } | undefined;
+    return row ? row.id : (insPlayer.run(n).lastInsertRowid as number);
+  });
+  const [mateId, b1, b2] = teamIds;
+  for (const id of teamIds) bank.ensureAccount(id);
+  const allIds = [...ids, ...teamIds];
+  const bal = (id: number) => bank.getBalance(id);
+
+  // --- validation ---
+  assertThrows('maker not seated refused (same_player)',
+    () => createTeamChallenge(gameId, redId, [blueId], [null], { entryFee: fee, scheduledAt: localIn(FUTURE), side: 'red' }),
+    'same_player');
+  assertThrows('a player can only hold one seat (same_player)',
+    () => createTeamChallenge(gameId, redId, [redId, null], [redId, null], { entryFee: fee, scheduledAt: localIn(FUTURE), side: 'red' }),
+    'same_player');
+  assertThrows('empty blue side refused (bad_terms)',
+    () => createTeamChallenge(gameId, redId, [redId], [], { entryFee: fee, scheduledAt: localIn(FUTURE), side: 'red' }),
+    'bad_terms');
+  assertThrows('oversize side refused (bad_terms)',
+    () => createTeamChallenge(gameId, redId, [redId, null, null, null, null], [blueId], { entryFee: fee, scheduledAt: localIn(FUTURE), side: 'red' }),
+    'bad_terms');
+
+  // --- T1: 1v2 — a broadcast challenge looking for TWO opponents --------
+  const preT1red = bal(redId); const preT1b1 = bal(b1); const preT1b2 = bal(b2);
+  const c9 = createTeamChallenge(gameId, redId, [redId], [null, null], {
+    entryFee: 50, scheduledAt: localIn(FUTURE), side: 'red',
+  });
+  const slots9 = getChallengeSlots(c9);
+  assert(slots9.length === 3 && slots9.filter(s => s.side === 'blue' && s.player_id == null).length === 2,
+    '1v2 broadcast: maker seated red, two open blue seats');
+  assert(slots9.find(s => s.player_id === redId)!.accepted_at != null, 'maker seat accepted at creation');
+
+  // First claim: only blue has open seats, so the side is inferable.
+  const partialA = respondToChallenge(c9, b1, 'accept');
+  assert(!partialA.gambleMatch && getChallenge(c9)!.status === 'pending', 'first broadcast claim does not open the match yet');
+  assert(bal(redId) === preT1red && bal(b1) === preT1b1 && bal(b2) === preT1b2, 'no money moves until the shape completes');
+
+  // Second claim completes the 1v2: everyone debited at once.
+  const doneT1 = respondToChallenge(c9, b2, 'accept', undefined, 'blue');
+  const gmT1 = doneT1.gambleMatch!;
+  assert(gmT1.status === 'open' && getChallenge(c9)!.status === 'accepted', 'completing claim opens the gamble match');
+  assert(bal(redId) === preT1red - 50 && bal(b1) === preT1b1 - 50 && bal(b2) === preT1b2 - 50, '1v2: all three entry fees debited only at completion');
+  const rosterT1 = getGambleParticipants(gmT1.id);
+  assert(rosterT1.filter(p => p.team === 0).map(p => p.player_id).join(',') === String(redId), '1v2 roster: red = single maker');
+  assert(rosterT1.filter(p => p.team === 1).length === 2, '1v2 roster: two blue opponents');
+  assert(gmT1.red_player_id === redId && gmT1.blue_player_id === b1, 'seat columns keep first-seat compat');
+  assertThrows('seated team-member cannot bet on own gamble (participants_may_not_bet)',
+    () => placeBet(gmT1.id, b1, 7, 3, 10), 'participants_may_not_bet');
+
+  fastForward(gmT1.id);
+  const sumT1 = settleGambleMatch(gmT1.id, [
+    { team: 0, player_ids: [redId], score: 7 },
+    { team: 1, player_ids: [b1, b2], score: 3 },
+  ], 'smoke team 1v2');
+  // entries 150: house fee 15, red slice 94, blue slice 40 split 20/20.
+  assert(sumT1.pot.houseFee === 15, '1v2: 10% house fee on the THREE combined entries');
+  assert(sumT1.playerEntry.find(e => e.playerId === redId)?.returned === 94, '1v2: red entry share 94');
+  assert(sumT1.playerEntry.find(e => e.playerId === b1)?.returned === 20
+    && sumT1.playerEntry.find(e => e.playerId === b2)?.returned === 20, '1v2: blue slice split evenly (20 each)');
+  assert(sumT1.pot.winnerPlayerId === redId && sumT1.pot.winnerShare === 0,
+    '1v2: red won but pot too small for a winner quarter (no bets)');
+  const reconT1 = getSettleSummary(gmT1.id)!;
+  assert(reconT1.pot.houseFee === 15 && reconT1.playerEntry.find(e => e.playerId === redId)?.returned === 94
+    && reconT1.playerEntry.find(e => e.playerId === b2)?.returned === 20,
+    '1v2: settle summary reconstructs from the ledger');
+
+  // --- T2: 2v2 — named team-mate must accept too, broadcast fills in -----
+  // Decline by an unaccepted named seat-holder kills the whole challenge
+  // (nothing has been debited yet).
+  const cTmp = createTeamChallenge(gameId, redId, [redId, mateId], [blueId, null], {
+    entryFee: 50, scheduledAt: localIn(FUTURE), side: 'red',
+  });
+  respondToChallenge(cTmp, mateId, 'decline');
+  assert(getChallenge(cTmp)!.status === 'declined', 'team-mate decline → challenge declined, no fees owed');
+  assertThrows('broadcast claims with seats open BOTH sides need an explicit side (no_open_slot)',
+    () => {
+      const cTmp2 = createTeamChallenge(gameId, redId, [redId, null], [blueId, null], {
+        entryFee: 50, scheduledAt: localIn(FUTURE), side: 'red',
+      });
+      respondToChallenge(cTmp2, b2, 'accept');
+    }, 'no_open_slot');
+
+  const preT2 = allIds.reduce((s, id) => s + bal(id), 0);
+  const c10 = createTeamChallenge(gameId, redId, [redId, mateId], [blueId, null], {
+    entryFee: 50, scheduledAt: localIn(FUTURE), side: 'red',
+  });
+  // Named team-mate accepts (their own accept, not the maker's):
+  respondToChallenge(c10, mateId, 'accept');
+  assert(getChallenge(c10)!.status === 'pending', 'team-mate accept keeps challenge pending until shape completes');
+  assert(allIds.reduce((s, id) => s + bal(id), 0) === preT2, 'team-mate accept moves no money yet');
+  assertThrows('already-accepted team-mate cannot accept again (not_negotiable)',
+    () => respondToChallenge(c10, mateId, 'accept'), 'not_negotiable');
+  assertThrows('maker cannot accept/claim again — they already hold an accepted seat (not_negotiable)',
+    () => respondToChallenge(c10, redId, 'accept', undefined, 'blue'), 'not_negotiable');
+  // The blue broadcast seat is the only one left — side inferable; but the
+  // named blue opponent still has to accept their seat afterwards.
+  const partialT2 = respondToChallenge(c10, b2, 'accept');
+  assert(!partialT2.gambleMatch, 'broadcast blue claim still waits on the named blue opponent');
+  const doneT2 = respondToChallenge(c10, blueId, 'accept');
+  const gmT2 = doneT2.gambleMatch!;
+  assert(gmT2.status === 'open', '2v2 completed → gamble open');
+  assert(allIds.reduce((s, id) => s + bal(id), 0) === preT2 - 4 * 50, '2v2: four entry fees debited only when the FULL shape completes');
+  const rosterT2 = getGambleParticipants(gmT2.id);
+  assert(rosterT2.filter(p => p.team === 0).map(p => p.player_id).join(',') === [redId, mateId].join(',') &&
+    rosterT2.filter(p => p.team === 1).map(p => p.player_id).join(',') === [blueId, b2].join(','),
+    '2v2 roster: seats in side order');
+  // A losing bet pads the pot so a winner quarter is payable (6-4 loses at 7-3).
+  placeBet(gmT2.id, b1, 6, 4, 20);
+  fastForward(gmT2.id);
+  const sumT2 = settleGambleMatch(gmT2.id, [
+    { team: 0, player_ids: [redId, mateId], score: 7 },
+    { team: 1, player_ids: [blueId, b2], score: 3 },
+  ], 'smoke team 2v2');
+  // hold 20 + 200 = 220; returns 0; house fee 20; shares 126+54 = 180 → leftover 20.
+  // Winner quarter 5 → 2 per red member (4). Score quarter 5: red slice 3 → 1 each,
+  // blue slice 1 → 0 each. Dust 1 to the house: house cut = 20 − 4 − 2 = 14.
+  assert(sumT2.pool === 20 && sumT2.betPayments[0]?.status === 'lost' && sumT2.leftover === 20,
+    '2v2: losing bet pads a 20 pot for the split');
+  assert(sumT2.pot.winnerPlayerIds?.length === 2 && sumT2.pot.winnerShare === 4
+    && sumT2.pot.winnerPlayerIds.includes(redId) && sumT2.pot.winnerPlayerIds.includes(mateId),
+    '2v2: winner quarter split EVENLY between the winning team (2 each)');
+  assert(sumT2.pot.scoreShares.find(s => s.playerId === redId)?.amount === 1
+    && sumT2.pot.scoreShares.find(s => s.playerId === mateId)?.amount === 1
+    && sumT2.pot.scoreShares.find(s => s.playerId === blueId)?.amount === 0,
+    '2v2: score quarter sliced per side then split evenly within the side');
+  assert(sumT2.pot.house === 14 && sumT2.pot.house + sumT2.pot.winnerShare
+    + sumT2.pot.scoreShares.reduce((s, x) => s + x.amount, 0) === sumT2.leftover,
+    '2v2: pot split fully accounted (floor dust to the house)');
+  assert(sumT2.playerEntry.filter(e => [redId, mateId].includes(e.playerId)).every(e => e.returned === 63)
+    && sumT2.playerEntry.filter(e => [blueId, b2].includes(e.playerId)).every(e => e.returned === 27),
+    '2v2: entry shares split evenly inside each side (63/63 vs 27/27)');
+
+  // --- T3: team cancel refunds every seat -------------------------------
+  const preT3red = bal(redId); const preT3b1 = bal(b1); const preT3g1 = bal(g1); const preT3g2 = bal(g2);
+  const c11 = createTeamChallenge(gameId, redId, [redId], [null, null], {
+    entryFee: 20, scheduledAt: localIn(FUTURE), side: 'red',
+  });
+  respondToChallenge(c11, g2, 'accept', undefined, 'blue');
+  const gmT3 = respondToChallenge(c11, g1, 'accept', undefined, 'blue').gambleMatch!;
+  placeBet(gmT3.id, b1, 5, 5, 5);
+  // Fees were debited at completion; a full cancel must put every seat back
+  // to its pre-challenge balance (net zero), and the stake back to b1.
+  cancelGambleMatch(gmT3.id);
+  assert(bal(redId) === preT3red && bal(g1) === preT3g1 && bal(g2) === preT3g2,
+    'team cancel: every seat fully refunded (net zero)');
+  assert(bal(b1) === preT3b1, 'team cancel: open stake fully refunded');
+
+  console.log('T1 (1v2) pot:', JSON.stringify(sumT1.pot));
+  console.log('T2 (2v2) pot:', JSON.stringify(sumT2.pot));
+
   // ============ conservation across everything =============================
-  const conservation = ids.reduce((s, id) => s + bank.getBalance(id), 0) + bank.getHouseBalance();
-  assert(conservation === ids.length * 1000 + HOUSE_SEED, `ledger identity holds across all cases (got ${conservation})`);
+  const conservation = allIds.reduce((s, id) => s + bal(id), 0) + bank.getHouseBalance();
+  assert(conservation === allIds.length * 1000 + HOUSE_SEED, `ledger identity holds across all cases (got ${conservation})`);
 
   console.log('challenge A pot:', JSON.stringify(summary.pot));
   console.log('challenge B pot:', JSON.stringify(sumB.pot));

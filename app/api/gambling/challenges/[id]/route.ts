@@ -2,7 +2,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import db from '@/lib/db';
-import { getChallenge, getChallengeTerms, getGambleMatch, deriveStatus, getBetPool } from '@/lib/gamble';
+import { getChallenge, getChallengeSlots, getChallengeTerms, getGambleMatch, deriveStatus, getBetPool } from '@/lib/gamble';
 import { computeOddsLadder } from '@/lib/gambleOdds';
 import { gambleErrorResponse } from '@/lib/gambleApi';
 
@@ -19,14 +19,15 @@ export async function GET(
     }
 
     const terms_history = getChallengeTerms(challengeId);
+    const slots = getChallengeSlots(challengeId);
     const gambleMatch = challenge.gamble_match_id ? getGambleMatch(challenge.gamble_match_id) : undefined;
     const derived = gambleMatch ? deriveStatus(gambleMatch) : null;
 
     // Frozen odds come with the match; while still negotiating, preview from
     // the current terms (same math the accept path freezes). Broadcast
-    // challenges can't preview — red may still be undetermined.
+    // challenges and team challenges can't preview — sides may be undetermined.
     let odds_preview = null;
-    if (!gambleMatch && terms_history.length > 0 && !challenge.broadcast) {
+    if (!gambleMatch && terms_history.length > 0 && !challenge.broadcast && slots.length === 0) {
       const game = db.prepare(`SELECT score_value FROM games WHERE id = ?`)
         .get(challenge.game_id) as { score_value: number } | undefined;
       if (game) {
@@ -44,6 +45,7 @@ export async function GET(
 
     return NextResponse.json({
       challenge,
+      slots,
       terms_history,
       gamble_match: gambleMatch,
       derived_status: derived?.status ?? null,

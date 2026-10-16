@@ -7,13 +7,27 @@ import { useMe } from '@/lib/contexts/MeContext';
 import { betsClosingSoon, formatBetsCountdown } from '@/lib/betsClock';
 import { PlayerAvatar } from '@/components/PlayerAvatar';
 import { MoneyChart } from '@/components/MoneyChart';
-import type { Challenge } from '@/lib/types';
+import type { Challenge, ChallengeSlot } from '@/lib/types';
 
 interface ChallengeWithNames extends Challenge {
   game_name?: string;
   challenger_name?: string;
   opponent_name?: string;
   terms_by_name?: string;
+  slots?: ChallengeSlot[];
+}
+
+/** Human summary of a team challenge's seats, e.g. "Stuts & Mark vs BlueB, 1 open seat". */
+function teamSeatsLine(c: ChallengeWithNames): string | null {
+  const slots = c.slots;
+  if (!slots || slots.length < 2) return null;
+  const side = (s: 'red' | 'blue') => {
+    const mine = slots.filter(x => x.side === s);
+    const names = mine.filter(x => x.player_id != null).map(x => x.player_name ?? `Player ${x.player_id}`);
+    const open = mine.filter(x => x.player_id == null).length;
+    return names.join(' & ') + (open ? `${names.length ? ' & ' : ''}${open} open` : '');
+  };
+  return `${side('red')} vs ${side('blue')} · ${slots.filter(x => x.side === 'red').length}v${slots.filter(x => x.side === 'blue').length}`;
 }
 
 interface GamblerStanding {
@@ -43,6 +57,7 @@ interface LobbyData {
   my_challenges: ChallengeWithNames[];
   broadcast_challenges: ChallengeWithNames[];
   callouts: ChallengeWithNames[];
+  team_challenges: ChallengeWithNames[];
   live_matches: {
     id: number;
     game_name?: string;
@@ -297,14 +312,18 @@ export default function GamblingLobby() {
               const iSentTerms = c.terms_by === me.id;
               const amChallenger = c.challenger_id === me.id;
               const counterpart = amChallenger ? c.opponent_name : c.challenger_name;
+              const seatsLine = teamSeatsLine(c);
               return (
                 <div key={c.id} className="rounded-xl border border-gray-200 bg-card p-4 flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <div className="text-sm font-semibold text-gray-900">
-                      {c.broadcast
+                      {seatsLine
+                        ? (amChallenger ? 'You issued a team challenge' : "Team challenge you're seated in")
+                        : c.broadcast
                         ? (amChallenger ? 'You broadcast a challenge (no opponent yet)' : 'Broadcast challenge')
                         : `${amChallenger ? 'You' : counterpart} challenged ${amChallenger ? counterpart : 'you'}`} · {c.game_name}
                     </div>
+                    {seatsLine && <div className="text-xs font-medium text-gray-700">⚔️ {seatsLine}</div>}
                     <div className="text-xs text-gray-500">
                       {c.entry_fee} moose bucks each · red:{' '}
                       <span className="font-medium text-red-600 font-semibold">
@@ -323,22 +342,31 @@ export default function GamblingLobby() {
                       Details
                     </Link>
                     {!iSentTerms ? (
-                      <>
-                        <button
-                          disabled={busy}
-                          onClick={() => respond(c.id, 'accept')}
-                          className="text-sm font-semibold bg-green-600 text-white px-3 py-1.5 rounded-lg hover:bg-green-700 disabled:opacity-50"
+                      seatsLine ? (
+                        <Link
+                          href={`/gambling/challenges/${c.id}`}
+                          className="text-sm px-3 py-1.5 rounded-lg border border-green-300 bg-green-50 text-green-700 font-semibold hover:bg-green-100"
                         >
-                          Accept {c.entry_fee}
-                        </button>
-                        <button
-                          disabled={busy}
-                          onClick={() => respond(c.id, 'decline')}
-                          className="text-sm px-3 py-1.5 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50"
-                        >
-                          Decline
-                        </button>
-                      </>
+                          Open to respond
+                        </Link>
+                      ) : (
+                        <>
+                          <button
+                            disabled={busy}
+                            onClick={() => respond(c.id, 'accept')}
+                            className="text-sm font-semibold bg-green-600 text-white px-3 py-1.5 rounded-lg hover:bg-green-700 disabled:opacity-50"
+                          >
+                            Accept {c.entry_fee}
+                          </button>
+                          <button
+                            disabled={busy}
+                            onClick={() => respond(c.id, 'decline')}
+                            className="text-sm px-3 py-1.5 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50"
+                          >
+                            Decline
+                          </button>
+                        </>
+                      )
                     ) : (
                       <button
                         disabled={busy}
@@ -400,6 +428,45 @@ export default function GamblingLobby() {
                 </div>
               </div>
             ))}
+          </div>
+        </section>
+      )}
+
+      {/* Team challenges with open broadcast seats — claim a seat */}
+      {data?.team_challenges && data.team_challenges.length > 0 && (
+        <section>
+          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">Team gambles — open seats to claim</h2>
+          <div className="space-y-2">
+            {data.team_challenges.map((c) => {
+              const seatsLine = teamSeatsLine(c);
+              const openCount = c.slots?.filter(s => s.player_id == null).length ?? 0;
+              return (
+                <div key={c.id} className="rounded-xl border border-blue-100 bg-blue-50/40 p-4 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900">
+                      <span className="text-blue-600">⚔️ {c.challenger_name}</span> is filling a team gamble · {c.game_name}
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      {seatsLine} · {c.entry_fee} moose bucks each · {openCount} open seat{openCount === 1 ? '' : 's'} ·{' '}
+                      at {new Date(c.scheduled_at.replace(' ', 'T') + 'Z').toLocaleString('en-GB', {
+                        weekday: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London',
+                      })}
+                    </div>
+                    {c.special_rules && (
+                      <div className="text-xs text-amber-700 italic mt-0.5">📜 {c.special_rules}</div>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <Link
+                      href={`/gambling/challenges/${c.id}`}
+                      className="text-sm font-semibold px-3 py-1.5 rounded-lg bg-primary text-white hover:bg-primary-hover"
+                    >
+                      Claim a seat
+                    </Link>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </section>
       )}
@@ -522,7 +589,7 @@ export default function GamblingLobby() {
                 <span className="text-sm font-medium text-white/80 uppercase tracking-wide">Challenges</span>
               </div>
               <div className="text-3xl font-bold">
-                {data ? (data.my_challenges.length + data.broadcast_challenges.length) : '—'}
+                {data ? (data.my_challenges.length + data.broadcast_challenges.length + data.team_challenges.length) : '—'}
               </div>
               <div className="text-xs text-white/80 mt-1">open including broadcasts</div>
             </div>

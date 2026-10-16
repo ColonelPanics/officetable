@@ -208,6 +208,22 @@ export interface ChallengeTerm {
   created_at: string;
 }
 
+/** One seat of a team challenge (see challenge_slots / createTeamChallenge).
+ *  player_id NULL = a broadcast slot anyone can claim; accepted_at NULL = a
+ *  named player who hasn't accepted yet (the maker's seat is accepted at
+ *  creation). Only challenges with ≥2 total slots use slots at all — plain
+ *  1v1s keep the legacy challenger/opponent flow. */
+export interface ChallengeSlot {
+  id: number;
+  challenge_id: number;
+  side: 'red' | 'blue';
+  slot_index: number;
+  player_id: number | null;
+  player_name?: string | null;
+  accepted_at: string | null;
+  created_at: string;
+}
+
 export interface ScoreOutcome {
   redScore: number;
   blueScore: number;
@@ -252,6 +268,16 @@ export interface GambleMatch {
   match_id?: number | null;
   settled_at?: string | null;
   created_at: string;
+  /** Full team rosters (team 0 = red, 1 = blue). Always present for
+   *  matches created by the team flow; backfilled for legacy 1v1s. */
+  participants?: GambleMatchPlayer[];
+}
+
+/** One player of one side of a gamble (see gamble_match_participants). */
+export interface GambleMatchPlayer {
+  team: number;
+  player_id: number;
+  player_name?: string;
 }
 
 export interface Bet {
@@ -298,6 +324,9 @@ export interface SettleSummary {
     /** 10% house fee taken off the combined entry before the score split. */
     houseFee: number;
     winnerPlayerId: number | null;
+    /** All winners of the winner quarter — it is split EVENLY between them
+     *  (a single player for 1v1s, the whole winning team otherwise). */
+    winnerPlayerIds?: number[];
     winnerShare: number;
     scoreShares: { playerId: number; amount: number }[];
     houseLoss: number;

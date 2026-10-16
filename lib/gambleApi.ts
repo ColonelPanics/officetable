@@ -86,6 +86,7 @@ STATUS_BY_CODE['bets_still_open'] = 409;
 STATUS_BY_CODE['bad_actor'] = 400;
 STATUS_BY_CODE['challenge_expired'] = 409;
 STATUS_BY_CODE['counter_not_allowed'] = 409;
+STATUS_BY_CODE['no_open_slot'] = 409;
 STATUS_BY_CODE['bank_not_linked'] = 403;
 STATUS_BY_CODE['bet_exceeds_pot'] = 409;
 STATUS_BY_CODE['not_logged_in'] = 403;

@@ -11,7 +11,7 @@ import {
   faceOffWidget,
   type AnnouncementMessage,
 } from './notifications';
-import type { Challenge, GambleMatch, SettleSummary } from './types';
+import type { Challenge, ChallengeSlot, GambleMatch, SettleSummary } from './types';
 
 const baseUrl = () => process.env.NEXT_PUBLIC_BASE_URL;
 
@@ -64,6 +64,20 @@ function gameMatchUrl(id: number | null | undefined, path: string): string | und
   return id != null && baseUrl() ? `${baseUrl()}/gambling/${path}/${id}` : undefined;
 }
 
+/** Side line for a card: full roster names joined ('Stuts & Joe'), falling
+ *  back to the legacy first-seat name when no roster is attached (legacy rows). */
+function sideCard(gm: GambleMatch, team: 0 | 1, fallbackId: number, fallbackName: string, extra: Partial<CardSide> = {}): CardSide {
+  const roster = (gm.participants ?? []).filter(p => p.team === team);
+  const names = roster.map(p => p.player_name ?? `Player ${p.player_id}`);
+  const name = names.length > 1 ? names.join(' & ') : (names[0] ?? fallbackName);
+  const avatarUrl = roster.length ? avatarMapFor(roster.map(p => p.player_id)).get(roster[0].player_id) : undefined;
+  if (!names.length && fallbackId != null) {
+    const avatars = avatarMapFor([fallbackId]);
+    return { name: fallbackName, avatarUrl: avatars.get(fallbackId), badgeColor: extra.badgeColor, ...extra };
+  }
+  return { name, avatarUrl, ...extra };
+}
+
 /** Challenge issued — the opponent (or the whole office, if broadcast) gets a respond prompt. */
 export async function announceChallengeIssued(challenge: Challenge): Promise<void> {
   const avatars = avatarMapFor([challenge.challenger_id, challenge.opponent_id]
@@ -104,9 +118,46 @@ export async function announceChallengeIssued(challenge: Challenge): Promise<voi
   await sendAnnouncementNotification(message);
 }
 
-/** Bets open on an accepted challenge. */
+/** Team challenge issued — broadcast seats highlighted, seat shape in the line. */
+export async function announceTeamChallengeIssued(challenge: Challenge, slots: ChallengeSlot[]): Promise<void> {
+  const ids = slots.map(s => s.player_id).filter((x): x is number => x != null);
+  const avatars = avatarMapFor(ids);
+  const seatLine = (side: 'red' | 'blue', badgeColor: string): CardSide => {
+    const mine = slots.filter(s => s.side === side);
+    const names = mine.filter(s => s.player_id != null).map(s => s.player_name ?? `Player ${s.player_id}`);
+    const open = mine.filter(s => s.player_id == null).length;
+    const label = [
+      names.join(' & '),
+      open ? `${names.length ? ' & ' : ''}${open} open seat${open === 1 ? '' : 's'}` : '',
+    ].filter(Boolean).join('');
+    const firstNamed = mine.find(s => s.player_id != null)?.player_id;
+    return {
+      name: label || 'Open seats',
+      avatarUrl: firstNamed != null ? avatars.get(firstNamed) : undefined,
+      badgeColor,
+      muted: !names.length,
+    };
+  };
+  const makerName = challenge.challenger_name ?? `Player ${challenge.challenger_id}`;
+  const openCount = slots.filter(s => s.player_id == null).length;
+  const shape = `${slots.filter(s => s.side === 'red').length}v${slots.filter(s => s.side === 'blue').length}`;
+  const line = `<b>${makerName}</b> throws down a ${shape} — ${moose(challenge.entry_fee)} each, ` +
+    (openCount ? `${openCount} seat${openCount === 1 ? '' : 's'} still to fill.` : 'waiting on the named seats to accept.');
+  const message: AnnouncementMessage = {
+    title: '⚔️ Team challenge issued',
+    subtitle: challenge.game_name ?? undefined,
+    paragraphs: [specialRulesLine(challenge.special_rules), line].filter(
+      (p): p is string => p != null,
+    ),
+    widgets: [faceOffWidget(seatLine('red', RED), seatLine('blue', BLUE))],
+    linkUrl: gameMatchUrl(challenge.id, 'challenges'),
+    linkText: openCount ? 'Claim or accept' : 'View it',
+  };
+  await sendAnnouncementNotification(message);
+}
+
+/** Bets open on an accepted challenge (any team shapes). */
 export async function announceBetsOpen(gambleMatch: GambleMatch): Promise<void> {
-  const avatars = avatarMapFor([gambleMatch.red_player_id, gambleMatch.blue_player_id]);
   const message: AnnouncementMessage = {
     title: '🎲 Bets are open',
     subtitle: gambleMatch.game_name,
@@ -116,8 +167,8 @@ export async function announceBetsOpen(gambleMatch: GambleMatch): Promise<void> 
     ].filter((p): p is string => p != null),
     widgets: [
       faceOffWidget(
-        { name: gambleMatch.red_player_name ?? 'Player', avatarUrl: avatars.get(gambleMatch.red_player_id), badgeColor: RED },
-        { name: gambleMatch.blue_player_name ?? 'Player', avatarUrl: avatars.get(gambleMatch.blue_player_id), badgeColor: BLUE },
+        sideCard(gambleMatch, 0, gambleMatch.red_player_id, gambleMatch.red_player_name ?? 'Player', { badgeColor: RED }),
+        sideCard(gambleMatch, 1, gambleMatch.blue_player_id, gambleMatch.blue_player_name ?? 'Player', { badgeColor: BLUE }),
       ),
     ],
     linkUrl: gameMatchUrl(gambleMatch.id, 'matches'),
@@ -129,7 +180,6 @@ export async function announceBetsOpen(gambleMatch: GambleMatch): Promise<void> 
 /** Bets closed — the window shut and the match is on: players to the table.
  *  Fired by syncStatuses exactly when rows flip open → awaiting_score. */
 export async function announceBetsClosed(gambleMatch: GambleMatch): Promise<void> {
-  const avatars = avatarMapFor([gambleMatch.red_player_id, gambleMatch.blue_player_id]);
   const message: AnnouncementMessage = {
     title: '⏰ Betting closed — to the table!',
     subtitle: gambleMatch.game_name,
@@ -138,8 +188,8 @@ export async function announceBetsClosed(gambleMatch: GambleMatch): Promise<void
     ),
     widgets: [
       faceOffWidget(
-        { name: gambleMatch.red_player_name ?? 'Player', avatarUrl: avatars.get(gambleMatch.red_player_id), badgeColor: RED },
-        { name: gambleMatch.blue_player_name ?? 'Player', avatarUrl: avatars.get(gambleMatch.blue_player_id), badgeColor: BLUE },
+        sideCard(gambleMatch, 0, gambleMatch.red_player_id, gambleMatch.red_player_name ?? 'Player', { badgeColor: RED }),
+        sideCard(gambleMatch, 1, gambleMatch.blue_player_id, gambleMatch.blue_player_name ?? 'Player', { badgeColor: BLUE }),
       ),
     ],
     linkUrl: gameMatchUrl(gambleMatch.id, 'matches'),
@@ -150,10 +200,11 @@ export async function announceBetsClosed(gambleMatch: GambleMatch): Promise<void
 
 /** Settled — just the result and who got paid; details on the match page. */
 export async function announceSettled(gambleMatch: GambleMatch, summary: SettleSummary): Promise<void> {
-  const avatars = avatarMapFor([gambleMatch.red_player_id ?? -1, gambleMatch.blue_player_id ?? -1]);
   const winners = summary.betPayments.filter(b => b.status === 'won');
-  const red = gambleMatch.red_player_name ?? 'Player';
-  const blue = gambleMatch.blue_player_name ?? 'Player';
+  const sideNames = (team: 0 | 1, fallback: string) =>
+    (gambleMatch.participants ?? []).filter(p => p.team === team).map(p => p.player_name ?? `Player ${p.player_id}`).join(' & ') || fallback;
+  const red = sideNames(0, gambleMatch.red_player_name ?? 'Player');
+  const blue = sideNames(1, gambleMatch.blue_player_name ?? 'Player');
   const draw = summary.finalScore.red === summary.finalScore.blue;
   const redWon = !draw && summary.finalScore.red > summary.finalScore.blue;
   const message: AnnouncementMessage = {
@@ -167,8 +218,8 @@ export async function announceSettled(gambleMatch: GambleMatch, summary: SettleS
     ],
     widgets: [
       faceOffWidget(
-        { name: red, avatarUrl: avatars.get(gambleMatch.red_player_id ?? -1), badge: `${summary.finalScore.red}`, badgeColor: draw ? MUTED : redWon ? WIN : MUTED, muted: !draw && !redWon },
-        { name: blue, avatarUrl: avatars.get(gambleMatch.blue_player_id ?? -1), badge: `${summary.finalScore.blue}`, badgeColor: draw ? MUTED : redWon ? MUTED : WIN, muted: !draw && redWon },
+        { ...sideCard(gambleMatch, 0, gambleMatch.red_player_id ?? -1, red, { badgeColor: draw ? MUTED : redWon ? WIN : MUTED }), badge: `${summary.finalScore.red}`, muted: !draw && !redWon },
+        { ...sideCard(gambleMatch, 1, gambleMatch.blue_player_id ?? -1, blue, { badgeColor: draw ? MUTED : redWon ? MUTED : WIN }), badge: `${summary.finalScore.blue}`, muted: !draw && redWon },
       ),
     ],
     linkUrl: gameMatchUrl(gambleMatch.id, 'matches'),
@@ -179,15 +230,14 @@ export async function announceSettled(gambleMatch: GambleMatch, summary: SettleS
 
 /** Cancelled / voided with refunds. */
 export async function announceCancelled(gambleMatch: GambleMatch, refundTotal: number): Promise<void> {
-  const avatars = avatarMapFor([gambleMatch.red_player_id ?? -1, gambleMatch.blue_player_id ?? -1]);
   const message: AnnouncementMessage = {
     title: '♻️ Gamble cancelled',
     subtitle: gambleMatch.game_name,
     paragraphs: [`${moose(refundTotal)} back to the players.`],
     widgets: [
       faceOffWidget(
-        { name: gambleMatch.red_player_name ?? 'Player', avatarUrl: avatars.get(gambleMatch.red_player_id ?? -1), badgeColor: RED, muted: true },
-        { name: gambleMatch.blue_player_name ?? 'Player', avatarUrl: avatars.get(gambleMatch.blue_player_id ?? -1), badgeColor: BLUE, muted: true },
+        sideCard(gambleMatch, 0, gambleMatch.red_player_id ?? -1, gambleMatch.red_player_name ?? 'Player', { badgeColor: RED, muted: true }),
+        sideCard(gambleMatch, 1, gambleMatch.blue_player_id ?? -1, gambleMatch.blue_player_name ?? 'Player', { badgeColor: BLUE, muted: true }),
       ),
     ],
     linkUrl: gameMatchUrl(gambleMatch.id, 'matches'),
@@ -203,9 +253,10 @@ export async function announceCorrected(
   from: { red: number | null; blue: number | null },
   to: { red: number; blue: number },
 ): Promise<void> {
-  const avatars = avatarMapFor([gambleMatch.red_player_id ?? -1, gambleMatch.blue_player_id ?? -1]);
-  const red = gambleMatch.red_player_name ?? 'Player';
-  const blue = gambleMatch.blue_player_name ?? 'Player';
+  const red = (gambleMatch.participants ?? []).filter(p => p.team === 0).map(p => p.player_name ?? `Player ${p.player_id}`).join(' & ')
+    || (gambleMatch.red_player_name ?? 'Player');
+  const blue = (gambleMatch.participants ?? []).filter(p => p.team === 1).map(p => p.player_name ?? `Player ${p.player_id}`).join(' & ')
+    || (gambleMatch.blue_player_name ?? 'Player');
   const draw = to.red === to.blue;
   const redWon = !draw && to.red > to.blue;
   const knownFrom = from.red != null && from.blue != null
@@ -219,8 +270,8 @@ export async function announceCorrected(
     ],
     widgets: [
       faceOffWidget(
-        { name: red, avatarUrl: avatars.get(gambleMatch.red_player_id ?? -1), badge: `${to.red}`, badgeColor: draw ? MUTED : redWon ? WIN : MUTED, muted: !draw && !redWon },
-        { name: blue, avatarUrl: avatars.get(gambleMatch.blue_player_id ?? -1), badge: `${to.blue}`, badgeColor: draw ? MUTED : redWon ? MUTED : WIN, muted: !draw && redWon },
+        { ...sideCard(gambleMatch, 0, gambleMatch.red_player_id ?? -1, red, { badgeColor: draw ? MUTED : redWon ? WIN : MUTED }), badge: `${to.red}`, muted: !draw && !redWon },
+        { ...sideCard(gambleMatch, 1, gambleMatch.blue_player_id ?? -1, blue, { badgeColor: draw ? MUTED : redWon ? MUTED : WIN }), badge: `${to.blue}`, muted: !draw && redWon },
       ),
     ],
     linkUrl: gameMatchUrl(gambleMatch.id, 'matches'),

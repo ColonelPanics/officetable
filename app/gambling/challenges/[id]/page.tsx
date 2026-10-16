@@ -5,7 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { useMe } from '@/lib/contexts/MeContext';
 import { useSelectedGame } from '@/lib/hooks/useSelectedGame';
 import { GambleOddsBoard } from '@/components/GambleOddsBoard';
-import type { Challenge, ChallengeTerm, GambleMatch, OddsLadder } from '@/lib/types';
+import type { Challenge, ChallengeSlot, ChallengeTerm, GambleMatch, OddsLadder } from '@/lib/types';
 
 // Challenge negotiation: current terms up top, history thread below, and
 // contextual actions — the non-terms author accepts/declines/counters, the
@@ -13,6 +13,8 @@ import type { Challenge, ChallengeTerm, GambleMatch, OddsLadder } from '@/lib/ty
 
 interface Detail {
   challenge: Challenge;
+  /** Team-challenge seats (empty for legacy 1v1s). NULL player = open seat. */
+  slots: ChallengeSlot[];
   terms_history: ChallengeTerm[];
   gamble_match: GambleMatch | null;
   derived_status: string | null;
@@ -72,7 +74,7 @@ export default function ChallengeDetailPage() {
     return () => clearInterval(timer);
   }, [load]);
 
-  async function respond(action: 'accept' | 'decline' | 'cancel' | 'counter', counter?: unknown) {
+  async function respond(action: 'accept' | 'decline' | 'cancel' | 'counter', counter?: unknown, claimSide?: 'red' | 'blue') {
     if (!me) return;
     setBusy(true);
     setError(null);
@@ -80,7 +82,7 @@ export default function ChallengeDetailPage() {
       const res = await fetch(`/api/gambling/challenges/${id}/respond`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ player_id: me.id, action, ...(counter ? { counter } : {}) }),
+        body: JSON.stringify({ player_id: me.id, action, ...(counter ? { counter } : {}), ...(claimSide ? { claim_side: claimSide } : {}) }),
       });
       const body = await res.json();
       if (!res.ok) {
@@ -101,13 +103,21 @@ export default function ChallengeDetailPage() {
     return <p className="text-sm text-gray-500">Loading challenge…</p>;
   }
 
-  const { challenge, terms_history, gamble_match } = detail;
+  const { challenge, terms_history, gamble_match, slots } = detail;
   const isBroadcast = !!challenge.broadcast;
+  const isTeam = slots.length > 0;
+  const openSeats = slots.filter(s => s.player_id == null);
+  const openSides = (['red', 'blue'] as const).filter(side => slots.some(s => s.side === side && s.player_id == null));
+  const awaitingCount = slots.filter(s => s.player_id != null && !s.accepted_at).length;
+  const mySlot = me ? slots.find(s => s.player_id === me.id) : undefined;
+  const amSeated = !!mySlot;
+  const amMaker = me?.id === challenge.challenger_id;
   const iSentTerms = me?.id === challenge.terms_by;
   const amParticipant = me != null && (
     me.id === challenge.challenger_id
     || me.id === challenge.opponent_id
     || (isBroadcast && me.id !== challenge.challenger_id)
+    || amSeated
   );
   const counterpart = challenge.challenger_id === me?.id ? challenge.opponent_name : challenge.challenger_name;
   const redName = challenge.red_player_id == null
@@ -177,7 +187,115 @@ export default function ChallengeDetailPage() {
             📢 Broadcast challenge — anyone (except the challenger) can accept and take the opposite side. Countering isn't possible. It expires 5 minutes before the start if nobody accepts.
           </div>
         )}
+        {isTeam && (
+          <div className="mt-3 border-t border-gray-100 pt-3">
+            <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">
+              Team gamble — {slots.filter(s => s.side === 'red').length}v{slots.filter(s => s.side === 'blue').length}{' · '}
+              {openSeats.length > 0
+                ? `${openSeats.length} open seat${openSeats.length === 1 ? '' : 's'} left`
+                : awaitingCount > 0
+                  ? `awaiting ${awaitingCount} acceptance${awaitingCount === 1 ? '' : 's'}`
+                  : 'waiting to complete…'}
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              {(['red', 'blue'] as const).map(side => (
+                <div key={side}>
+                  <div className={`text-[11px] font-semibold uppercase tracking-wide ${side === 'red' ? 'text-red-500' : 'text-blue-500'}`}>{side} side</div>
+                  <ul className="mt-1 space-y-1 text-sm">
+                    {slots.filter(s => s.side === side).map(s => (
+                      <li key={s.id} className="flex flex-wrap items-baseline gap-2">
+                        {s.player_id == null ? (
+                          <span className="text-amber-600">📢 open seat — first to claim</span>
+                        ) : (
+                          <>
+                            <span className={`font-medium ${side === 'red' ? 'text-red-600' : 'text-blue-600'}`}>{s.player_name}</span>
+                            {s.accepted_at
+                              ? <span className="text-[11px] text-green-600">✓ accepted</span>
+                              : s.player_id === challenge.challenger_id
+                                ? <span className="text-[11px] text-green-600">maker</span>
+                                : <span className="text-[11px] text-amber-600">⏳ awaiting their accept</span>}
+                          </>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+            <div className="text-xs text-gray-400 mt-1">
+              Everyone except the maker must accept — team-mates included. Entry fees are only charged when the FULL shape is filled and accepted.
+            </div>
+          </div>
+        )}
       </div>
+
+      {/* Team-challenge actions: hold/claim seats, maker withdraws */}
+      {isTeam && challenge.status === 'pending' && me && (
+        <div className="rounded-xl border border-gray-200 bg-card p-4 flex flex-wrap items-center gap-3">
+          {amMaker ? (
+            <>
+              <span className="text-sm text-gray-500">
+                Waiting on {openSeats.length + awaitingCount} seat{openSeats.length + awaitingCount === 1 ? '' : 's'} to fill — named players accept, broadcast seats get claimed.
+              </span>
+              <button
+                disabled={busy}
+                onClick={() => respond('cancel')}
+                className="ml-auto px-4 py-2 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 disabled:opacity-50"
+              >
+                Withdraw challenge
+              </button>
+            </>
+          ) : mySlot && !mySlot.accepted_at ? (
+            <>
+              <button
+                disabled={busy}
+                onClick={() => respond('accept')}
+                className="font-semibold bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 disabled:opacity-50"
+              >
+                Accept — you'll pay {challenge.entry_fee} once everyone's in
+              </button>
+              <button
+                disabled={busy}
+                onClick={() => respond('decline')}
+                className="px-4 py-2 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50"
+              >
+                Decline (cancels the challenge)
+              </button>
+            </>
+          ) : !mySlot && openSeats.length > 0 ? (
+            <>
+              {openSides.length === 1 ? (
+                <button
+                  disabled={busy}
+                  onClick={() => respond('accept', undefined, openSides[0])}
+                  className="font-semibold bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 disabled:opacity-50"
+                >
+                  Claim the {openSides[0]} seat — join for {challenge.entry_fee} moose bucks
+                </button>
+              ) : (
+                <>
+                  <span className="text-sm text-gray-500">Open seat on both sides — pick one:</span>
+                  {openSides.map(side => (
+                    <button
+                      key={side}
+                      disabled={busy}
+                      onClick={() => respond('accept', undefined, side)}
+                      className={`font-semibold px-4 py-2 rounded-lg text-white disabled:opacity-50 ${side === 'red' ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'}`}
+                    >
+                      Join {side} ({challenge.entry_fee})
+                    </button>
+                  ))}
+                </>
+              )}
+              <span className="text-xs text-gray-400">You pay only when the whole shape is filled and accepted.</span>
+            </>
+          ) : (
+            <span className="text-sm text-gray-500">
+              You're in — waiting on {awaitingCount + openSeats.length} other seat{awaitingCount + openSeats.length === 1 ? '' : 's'}.
+            </span>
+          )}
+        </div>
+      )}
 
       {error && (
         <div className="rounded-lg bg-red-50 border border-red-200 text-red-700 px-4 py-3 text-sm">{error}</div>
@@ -189,7 +307,8 @@ export default function ChallengeDetailPage() {
           <span className="font-semibold">🔐 Log in (top right)</span> with your bank credentials to respond.
         </div>
       )}
-      {amParticipant && (challenge.status === 'pending' || challenge.status === 'countered') && (
+      {/* Legacy 1v1/broadcast actions (team challenges use the block above) */}
+      {!isTeam && amParticipant && (challenge.status === 'pending' || challenge.status === 'countered') && (
         <div className="rounded-xl border border-gray-200 bg-card p-4 flex flex-wrap items-center gap-3">
           {!iSentTerms ? (
             <>

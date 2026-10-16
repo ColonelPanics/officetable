@@ -18,6 +18,13 @@ export default function NewChallengePage() {
 
   const [opponentId, setOpponentId] = useState<number | null>(null);
   const [broadcast, setBroadcast] = useState(false);
+  // Team gamble builder: the maker sits on their chosen side (seat 0), plus
+  // extra seats that are either a named player or a broadcast/null open seat.
+  // The other side is made entirely of these seats — a named one, two open
+  // ones for a 1v2, whatever shape you want (up to 4 a side).
+  const [teamMode, setTeamMode] = useState(false);
+  const [myExtraSeats, setMyExtraSeats] = useState<(number | null)[]>([null]);
+  const [otherSeats, setOtherSeats] = useState<(number | null)[]>([null, null]);
   const [entryFee, setEntryFee] = useState(50);
   const [side, setSide] = useState<'red' | 'blue'>('red');
   const [payoutLine, setPayoutLine] = useState('elo_even');
@@ -48,7 +55,7 @@ export default function NewChallengePage() {
   // so the preview runs through the games/odds endpoint.
   const gameId = selectedGameId;
   useEffect(() => {
-    if (!gameId || !me || broadcast || !opponentId) { setLadder(null); setPreview(null); return; }
+    if (!gameId || !me || broadcast || teamMode || !opponentId) { setLadder(null); setPreview(null); return; }
     if (previewTimer) clearTimeout(previewTimer);
     const timer = setTimeout(async () => {
       try {
@@ -71,10 +78,11 @@ export default function NewChallengePage() {
     }, 400);
     setPreviewTimer(timer);
     return () => clearTimeout(timer);
-  }, [gameId, me?.id, opponentId, side, redName, blueName, broadcast]);
+  }, [gameId, me?.id, opponentId, side, redName, blueName, broadcast, teamMode]);
 
   async function submit() {
-    if (!me || (!broadcast && !opponentId)) return;
+    if (!me) return;
+    if (!teamMode && !broadcast && !opponentId) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -83,8 +91,14 @@ export default function NewChallengePage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           challenger_id: me.id,
-          broadcast,
-          ...(broadcast ? {} : { opponent_id: opponentId }),
+          ...(teamMode
+            ? (side === 'red'
+              ? { red_slots: [me.id, ...myExtraSeats], blue_slots: otherSeats }
+              : { blue_slots: [me.id, ...myExtraSeats], red_slots: otherSeats })
+            : {
+                broadcast,
+                ...(broadcast ? {} : { opponent_id: opponentId }),
+              }),
           game_id: selectedGameId,
           entry_fee: entryFee,
           scheduled_at: scheduledLocal,
@@ -105,6 +119,9 @@ export default function NewChallengePage() {
   }
 
   const feeInvalid = !Number.isInteger(entryFee) || entryFee < 10 || entryFee > 500;
+  const teamShapeInvalid =
+    teamMode && (otherSeats.length < 1 || myExtraSeats.length > 3 || otherSeats.length > 4);
+  const namedIds = [...myExtraSeats, ...otherSeats].filter((x): x is number => x != null && x !== me?.id);
 
   // Payout line options: evens presets + custom R-B lines that sum to the
   // game total (10-0 / 0-10 are deliberately not choosable — real wins/draws
@@ -124,8 +141,8 @@ export default function NewChallengePage() {
     <div className="space-y-5">
       <div className="rounded-xl border border-gray-200 bg-card p-5 space-y-4">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {/* Opponent */}
-          {broadcast ? (
+          {/* Opponent (1v1 modes only — teams use the seat editor below) */}
+          {!teamMode && (broadcast ? (
             <div className="block">
               <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Challenging</span>
               <div className="mt-1 px-3 py-2 rounded-lg border border-amber-300 bg-amber-50 text-sm text-amber-800">
@@ -152,7 +169,7 @@ export default function NewChallengePage() {
                 {me ? `You are ${me.name} — log out (top right) if that's wrong.` : 'Not logged in — log in (top right) to send challenges.'}
               </span>
             </label>
-          )}
+          ))}
 
           {/* Game */}
           <label className="block">
@@ -203,16 +220,135 @@ export default function NewChallengePage() {
           </label>
         </div>
 
-        {/* Broadcast toggle */}
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={broadcast}
-            onChange={e => setBroadcast(e.target.checked)}
-            className="w-4 h-4 accent-amber-600"
-          />
-          <span className="text-sm text-gray-700 font-medium">📢 Broadcast — open to everyone, first to accept plays the other side</span>
-        </label>
+        {/* Mode toggles */}
+        <div className="space-y-2">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={teamMode}
+              onChange={e => setTeamMode(e.target.checked)}
+              className="w-4 h-4 accent-amber-600"
+            />
+            <span className="text-sm text-gray-700 font-medium">
+              ⚔️ Team gamble — uneven teams welcome (1v2 you vs two of them, 2v2…). Seats can be named players or open for anyone to claim.
+            </span>
+          </label>
+          {!teamMode && (
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={broadcast}
+                onChange={e => setBroadcast(e.target.checked)}
+                className="w-4 h-4 accent-amber-600"
+              />
+              <span className="text-sm text-gray-700 font-medium">📢 Broadcast — open to everyone, first to accept plays the other side</span>
+            </label>
+          )}
+        </div>
+
+        {/* Team seat editor */}
+        {teamMode && (() => {
+          const namedTaken = namedIds;
+          const seatRow = (
+            seat: number | null,
+            idx: number,
+            seats: (number | null)[],
+            setSeats: (next: (number | null)[]) => void,
+            canRemove: boolean,
+          ) => (
+            <div key={idx} className="flex items-center gap-2">
+              <select
+                value={seat == null ? 'open' : String(seat)}
+                onChange={e => {
+                  const next = [...seats];
+                  next[idx] = e.target.value === 'open' ? null : parseInt(e.target.value, 10);
+                  setSeats(next);
+                }}
+                className="flex-1 px-2 py-1.5 rounded-lg border border-gray-200 bg-background text-gray-800 text-sm"
+              >
+                <option value="open">📢 Open seat — anyone can claim it</option>
+                {players.filter(p => p.id !== me?.id && !namedTaken.includes(p.id)).map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+              {canRemove && (
+                <button
+                  type="button"
+                  title="Remove seat"
+                  onClick={() => setSeats(seats.filter((_, i) => i !== idx))}
+                  className="px-1.5 py-1 text-gray-400 hover:text-red-500"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+          );
+          const MY_MAX_EXTRA = 3; // me + up to 3 more = 4 a side
+          const otherColour = side === 'red' ? 'text-blue-500' : 'text-red-500';
+          const myColour = side === 'red' ? 'text-red-500' : 'text-blue-500';
+          return (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="rounded-lg border border-gray-200 p-3 space-y-2">
+                <div className={`text-xs font-semibold uppercase tracking-wide ${myColour}`}>Your side — {side === 'red' ? 'red' : 'blue'}</div>
+                <div className="px-2 py-1.5 rounded-lg border border-amber-200 bg-amber-50 text-sm text-amber-800 font-medium">
+                  {me ? me.name : 'You'} (you — maker)
+                </div>
+                {myExtraSeats.map((s, i) => seatRow(s, i, myExtraSeats, setMyExtraSeats, true))}
+                {myExtraSeats.length < MY_MAX_EXTRA && (
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setMyExtraSeats([...myExtraSeats, null])}
+                      className="text-xs px-2 py-1 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50"
+                    >
+                      + open seat
+                    </button>
+                    <button
+                      type="button"
+                      disabled={players.filter(p => p.id !== me?.id && !namedTaken.includes(p.id)).length === 0}
+                      onClick={() => {
+                        const firstFree = players.find(p => p.id !== me?.id && !namedTaken.includes(p.id));
+                        if (firstFree) setMyExtraSeats([...myExtraSeats, firstFree.id]);
+                      }}
+                      className="text-xs px-2 py-1 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40"
+                    >
+                      + named seat
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div className="rounded-lg border border-gray-200 p-3 space-y-2">
+                <div className={`text-xs font-semibold uppercase tracking-wide ${otherColour}`}>Opposition — {side === 'red' ? 'blue' : 'red'}</div>
+                {otherSeats.map((s, i) => seatRow(s, i, otherSeats, setOtherSeats, otherSeats.length > 1))}
+                {otherSeats.length < 4 && (
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setOtherSeats([...otherSeats, null])}
+                      className="text-xs px-2 py-1 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50"
+                    >
+                      + open seat
+                    </button>
+                    <button
+                      type="button"
+                      disabled={players.filter(p => p.id !== me?.id && !namedTaken.includes(p.id)).length === 0}
+                      onClick={() => {
+                        const firstFree = players.find(p => p.id !== me?.id && !namedTaken.includes(p.id));
+                        if (firstFree) setOtherSeats([...otherSeats, firstFree.id]);
+                      }}
+                      className="text-xs px-2 py-1 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40"
+                    >
+                      + named seat
+                    </button>
+                  </div>
+                )}
+                <div className="text-xs text-gray-400">
+                  At least one seat. Looking for 2 opponents? Leave two open — the first two to claim play with/against you.
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Side */}
         <div>
@@ -234,11 +370,13 @@ export default function NewChallengePage() {
             ))}
           </div>
           <span className="text-xs text-gray-400">
-            {broadcast
-              ? side === 'red'
-                ? 'You play red · first to accept plays blue'
-                : 'You play blue · first to accept plays red'
-              : `Red side: ${redName} · Blue side: ${blueName}`}
+            {teamMode
+              ? `You sit in seat 0 of the ${side} side${myExtraSeats.length ? ` with ${myExtraSeats.length} team-mate seat${myExtraSeats.length === 1 ? '' : 's'}` : ''} — the ${side === 'red' ? 'blue' : 'red'} side has ${otherSeats.length} seat${otherSeats.length === 1 ? '' : 's'}. Every seat holder except you must accept before it opens.`
+              : broadcast
+                ? side === 'red'
+                  ? 'You play red · first to accept plays blue'
+                  : 'You play blue · first to accept plays red'
+                : `Red side: ${redName} · Blue side: ${blueName}`}
           </span>
         </div>
 
@@ -281,14 +419,18 @@ export default function NewChallengePage() {
 
         <button
           onClick={submit}
-          disabled={!me || (!broadcast && !opponentId) || !selectedGameId || feeInvalid || submitting}
+          disabled={!me || (!broadcast && !opponentId && !teamMode) || teamShapeInvalid || !selectedGameId || feeInvalid || submitting}
           className="w-full sm:w-auto font-semibold bg-primary text-white rounded-lg px-6 py-2.5 hover:bg-primary-hover shadow-sm disabled:opacity-40"
         >
-          {submitting ? 'Sending…' : 'Send challenge'}
+          {submitting ? 'Sending…' : teamMode ? 'Send team challenge' : 'Send challenge'}
         </button>
         <p className="text-xs text-gray-400">
-          No money moves until the challenge is accepted{broadcast ? ' (first player to accept takes the other side)' : ''}.
-          They can accept, decline, or counter your terms{broadcast ? ' — broadcasts can\'t be counted' : ''}.
+          No money moves until the challenge is accepted —{' '}
+          {teamMode
+            ? 'and every seat is filled and accepted; seat holders pay only then, and anyone declining or expiring strands nothing.'
+            : broadcast
+              ? "first player to accept takes the other side, and broadcasts can't be countered."
+              : 'they can accept, decline, or counter your terms.'}
         </p>
       </div>
 

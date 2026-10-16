@@ -762,6 +762,51 @@ for (const stmt of [
   try { db.exec(stmt); } catch { /* column already exists */ }
 }
 
+// ---------------------------------------------------------------------------
+// Team gambles: slots per side on challenges, full rosters on gamble matches.
+// Both tables are additive — legacy 1v1 challenges/matches have no slot rows
+// and keep the legacy flow untouched. gamble_match_participants is backfilled
+// from the red/blue seat columns so every reader can key off this table going
+// forward; red_player_id/blue_player_id remain "first seat" for the legacy
+// joins, list SQL and existing UI.
+// ---------------------------------------------------------------------------
+db.exec(`
+  CREATE TABLE IF NOT EXISTS challenge_slots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    challenge_id INTEGER NOT NULL REFERENCES challenges(id),
+    side TEXT NOT NULL CHECK (side IN ('red','blue')),
+    slot_index INTEGER NOT NULL,
+    player_id INTEGER REFERENCES players(id),   -- NULL until a broadcast slot is claimed
+    accepted_at DATETIME,                       -- NULL = named player hasn't accepted (maker accepted at creation)
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_challenge_slots_challenge ON challenge_slots(challenge_id, side, slot_index);
+  CREATE INDEX IF NOT EXISTS idx_challenge_slots_player ON challenge_slots(player_id);
+
+  CREATE TABLE IF NOT EXISTS gamble_match_participants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    gamble_match_id INTEGER NOT NULL REFERENCES gamble_matches(id),
+    team INTEGER NOT NULL CHECK (team IN (0,1)),
+    player_id INTEGER NOT NULL REFERENCES players(id),
+    UNIQUE (gamble_match_id, player_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_gmp_match ON gamble_match_participants(gamble_match_id, team);
+  CREATE INDEX IF NOT EXISTS idx_gmp_player ON gamble_match_participants(player_id);
+`);
+
+// Backfill: every pre-existing 1v1 gamble match gets its two roster rows so
+// the team code paths work on old data without special cases.
+try {
+  db.exec(`
+    INSERT OR IGNORE INTO gamble_match_participants (gamble_match_id, team, player_id)
+      SELECT id, 0, red_player_id FROM gamble_matches;
+    INSERT OR IGNORE INTO gamble_match_participants (gamble_match_id, team, player_id)
+      SELECT id, 1, blue_player_id FROM gamble_matches;
+  `);
+} catch (e) {
+  console.error('gamble_match_participants backfill failed:', e);
+}
+
 // Seed an account for every existing player (new players get accounted via
 // lib/bank.ensureAccount — same INSERT OR IGNORE, so repeated calls are free).
 // Mock/offline mode mints 1000 each; when the central Alces bank is wired,

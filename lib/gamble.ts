@@ -15,8 +15,10 @@ import { normaliseStartDate, toDbDate } from './seasons';
 import type {
   Bet,
   Challenge,
+  ChallengeSlot,
   ChallengeTerm,
   GambleMatch,
+  GambleMatchPlayer,
   GambleMatchStatus,
   OddsLadder,
   PayoutLine,
@@ -49,6 +51,8 @@ export const GAMBLE_RULES = {
   resultDeadlineMinutes: 120,
   /** Cap on the free-text special rules note. */
   maxSpecialRulesLength: 500,
+  /** Team gambles: seats per side (1v2, 2v2 … up to 4 a side). */
+  maxTeamSize: 4,
 } as const;
 
 /** Mock-mode floor under the casino's payout exposure guard: the local casino
@@ -123,7 +127,8 @@ export function syncStatuses(): void {
       WHERE status = 'open' AND bet_close_at <= ?
     `).run(nowDbDate());
     for (const gm of closing) {
-      announceBetsClosed(gm as unknown as GambleMatch).catch(() => {});
+      const full = getGambleMatch(gm.id);
+      if (full) announceBetsClosed(full).catch(() => {});
       console.log(`gamble match ${gm.id}: bets closed — awaiting score`);
     }
   }
@@ -142,8 +147,9 @@ export function syncStatuses(): void {
   for (const { id } of overdue) {
     try {
       const gm = getGambleMatch(id)!;
+      const seats = getGambleParticipants(id);
       cancelGambleMatch(id);
-      announceCancelled(gm, getBetPool(id) + 2 * gm.entry_fee).catch(() => {});
+      announceCancelled(gm, getBetPool(id) + gm.entry_fee * seats.length).catch(() => {});
       console.log(`gamble match ${id} auto-cancelled — result missed the ${GAMBLE_RULES.resultDeadlineMinutes}-minute deadline`);
     } catch (e) {
       console.error(`auto-cancel failed for gamble match ${id}:`, e);
@@ -268,6 +274,97 @@ export function createChallenge(
   })();
 }
 
+/**
+ * Create a TEAM challenge with explicit seats per side (`createSlots` shape:
+ * a player id per seat, or null for a broadcast seat anyone can claim).
+ * Examples — 1v2 ("me vs two of you"), 2v2, "Stuts & Mark vs broadcast +
+ * broadcast"; uneven teams are fine. The maker must occupy exactly one seat;
+ * every OTHER seat holder — team-mates included — must accept, and open
+ * broadcast seats can be claimed by anyone not already seated. The gamble
+ * match opens (fees debited, odds frozen) only when the last acceptance
+ * completes the shape, so a decline/expire still never strands a fee.
+ * Countering isn't offered on team challenges.
+ */
+export function createTeamChallenge(
+  gameId: number,
+  challengerId: number,
+  redSlots: (number | null)[],
+  blueSlots: (number | null)[],
+  terms: ChallengeTermsInput
+): number {
+  if (redSlots.length < 1 || blueSlots.length < 1) {
+    throw new GambleError('Both sides need at least one seat', 'bad_terms');
+  }
+  if (redSlots.length > GAMBLE_RULES.maxTeamSize || blueSlots.length > GAMBLE_RULES.maxTeamSize) {
+    throw new GambleError(`Each side can have at most ${GAMBLE_RULES.maxTeamSize} seats`, 'bad_terms');
+  }
+
+  const named = [...redSlots, ...blueSlots].filter((id): id is number => id != null);
+  // Maker occupies exactly one seat; nobody sits twice (an id must not
+  // appear in two seats, and broadcast seats are null by definition).
+  const makerSeats = named.filter(id => id === challengerId).length;
+  if (makerSeats !== 1) {
+    throw new GambleError('You must occupy exactly one seat of your challenge', 'same_player');
+  }
+  if (new Set(named).size !== named.length) {
+    throw new GambleError('A player can only hold one seat', 'same_player');
+  }
+
+  const game = db.prepare(`SELECT id, name, score_type, score_value FROM games WHERE id = ?`)
+    .get(gameId) as { id: number; name: string; score_type: string; score_value: number } | undefined;
+  if (!game) throw new GambleError('Unknown game', 'unknown_game');
+  if (game.score_type !== 'best_of') {
+    throw new GambleError(`Betting is only set up for fixed-total games (${game.name} is "${game.score_type}")`, 'unsupported_game');
+  }
+  assertBankLinked(challengerId);
+  if (named.length) {
+    const placeholders = named.map(() => '?').join(',');
+    const known = db.prepare(`SELECT COUNT(*) as n FROM players WHERE id IN (${placeholders})`)
+      .get(...named) as { n: number };
+    if (known.n !== named.length) throw new GambleError('Unknown player', 'unknown_player');
+  }
+
+  const error = validateTerms(terms);
+  if (error) throw new GambleError(error, 'bad_terms');
+  const payoutLine = parsePayoutLine(terms.payoutLine, game.score_value);
+  if (!payoutLine) {
+    throw new GambleError("Payout line must be 'true_even', 'elo_even' or a scoreline from 9-1 to 1-9 that sums to the game total", 'bad_terms');
+  }
+  const side = terms.side === 'blue' ? 'blue' : 'red';
+
+  const scheduled = normaliseStartDate(terms.scheduledAt);
+  const specialRules = terms.specialRules?.trim() ?? null;
+  // Compat seat columns: first named player per side (NULL when a side is
+  // wholly broadcast — e.g. two open seats against me).
+  const redPlayerId = (redSlots.find((id): id is number => id != null)) ?? null;
+
+  return db.transaction((): number => {
+    const result = db.prepare(`
+      INSERT INTO challenges (
+        game_id, challenger_id, opponent_id, entry_fee, scheduled_at,
+        red_player_id, challenger_side, status, terms_by, broadcast, payout_line, special_rules
+      )
+      VALUES (?, ?, NULL, ?, ?, ?, ?, 'pending', ?, 0, ?, ?)
+    `).run(gameId, challengerId, terms.entryFee, scheduled, redPlayerId, side, challengerId, payoutLine, specialRules);
+    const challengeId = result.lastInsertRowid as number;
+
+    db.prepare(`
+      INSERT INTO challenge_terms (challenge_id, entry_fee, scheduled_at, red_player_id, proposed_by, payout_line, special_rules)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(challengeId, terms.entryFee, scheduled, redPlayerId, challengerId, payoutLine, specialRules);
+
+    const seat = db.prepare(`
+      INSERT INTO challenge_slots (challenge_id, side, slot_index, player_id, accepted_at)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    const now = nowDbDate();
+    redSlots.forEach((pid, i) => seat.run(challengeId, 'red', i, pid, pid === challengerId ? now : null));
+    blueSlots.forEach((pid, i) => seat.run(challengeId, 'blue', i, pid, pid === challengerId ? now : null));
+
+    return challengeId;
+  })();
+}
+
 function futureScheduledAt(input: string): string {
   const scheduled = normaliseStartDate(input);
   if (new Date(scheduled.replace(' ', 'T') + 'Z').getTime() <= Date.now()) {
@@ -291,7 +388,8 @@ export function respondToChallenge(
   challengeId: number,
   playerId: number,
   action: 'accept' | 'decline' | 'cancel' | 'counter',
-  counter?: ChallengeTermsInput
+  counter?: ChallengeTermsInput,
+  claimSide?: 'red' | 'blue'
 ): { challenge: Challenge; gambleMatch?: GambleMatch; ladder?: OddsLadder; balances?: { challenger: number; opponent: number } } {
   syncStatuses();
   const challenge = getChallenge(challengeId);
@@ -304,6 +402,12 @@ export function respondToChallenge(
   }
   if (challenge.status !== 'pending' && challenge.status !== 'countered') {
     throw new GambleError(`Challenge is already ${challenge.status}`, 'not_negotiable');
+  }
+
+  // Team challenges have their own state machine (seat claims, all-or-nothing
+  // completion) — route them there before any 1v1/broadcast logic applies.
+  if (challengeHasSlots(challengeId)) {
+    return respondToTeamChallenge(challenge, playerId, action, claimSide);
   }
 
   const broadcast = challenge.broadcast === 1;
@@ -434,6 +538,13 @@ export function respondToChallenge(
     );
     const gmId = result.lastInsertRowid as number;
 
+    // Roster rows (same table team gambles use) — 1v1s are just tiny teams.
+    const seat = db.prepare(
+      `INSERT OR IGNORE INTO gamble_match_participants (gamble_match_id, team, player_id) VALUES (?, ?, ?)`
+    );
+    seat.run(gmId, 0, redPlayerId);
+    seat.run(gmId, 1, bluePlayerId);
+
     db.prepare(`UPDATE challenges SET gamble_match_id = ? WHERE id = ?`).run(gmId, challengeId);
     return gmId;
   })();
@@ -456,6 +567,179 @@ function getGameTotal(gameId: number): number {
   const row = db.prepare(`SELECT score_value FROM games WHERE id = ?`)
     .get(gameId) as { score_value: number } | undefined;
   return row?.score_value ?? 0;
+}
+
+/**
+ * Team-challenge response handling. Everyone but the maker must accept (team-
+ * mates included); broadcast seats are claimed by the first comer. Nothing is
+ * owed until the LAST acceptance fills the shape — that completing accept
+ * freezes the odds with the full teams, debits every seat holder one entry
+ * fee and opens the gamble match. Decline/withdraw before that moves nothing.
+ */
+function respondToTeamChallenge(
+  challenge: Challenge,
+  playerId: number,
+  action: 'accept' | 'decline' | 'cancel' | 'counter',
+  claimSide?: 'red' | 'blue'
+): { challenge: Challenge; gambleMatch?: GambleMatch; ladder?: OddsLadder } {
+  const challengeId = challenge.id;
+  const isMaker = playerId === challenge.challenger_id;
+  let slots = getChallengeSlots(challengeId);
+  const mySlot = slots.find(s => s.player_id === playerId);
+
+  if (action === 'counter') {
+    throw new GambleError('Countering is not possible on team challenges — the maker sets the terms, you accept or decline', 'counter_not_allowed');
+  }
+
+  if (action === 'cancel') {
+    if (!isMaker) {
+      throw new GambleError('Only the maker can withdraw a team challenge', 'not_a_participant');
+    }
+    db.prepare(`UPDATE challenges SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(challengeId);
+    return { challenge: getChallenge(challengeId)! };
+  }
+
+  if (action === 'decline') {
+    if (!isMaker && !mySlot) {
+      throw new GambleError('Only the maker or a seat holder can decline this challenge', 'not_a_participant');
+    }
+    db.prepare(`UPDATE challenges SET status = 'declined', updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(challengeId);
+    return { challenge: getChallenge(challengeId)! };
+  }
+
+  // ---- accept: seat claim / named acceptance, then completion ----
+
+  if (mySlot && mySlot.accepted_at) {
+    throw new GambleError('You have already accepted this challenge — waiting on the remaining seats', 'not_negotiable');
+  }
+
+  if (mySlot) {
+    // Named seat holder accepting. The maker's own seat was accepted at
+    // creation, so this only fires for teammates/named opponents.
+    const upd = db.prepare(`
+      UPDATE challenge_slots SET accepted_at = ? WHERE id = ? AND accepted_at IS NULL
+    `).run(nowDbDate(), mySlot.id);
+    if (upd.changes === 0) {
+      throw new GambleError('You have already accepted this challenge', 'not_negotiable');
+    }
+  } else {
+    // Not seated — claim an open broadcast seat. The claimant picks the side
+    // (or it's inferred when exactly one side has open seats).
+    if (isMaker) {
+      throw new GambleError('You already hold a seat in your own challenge', 'not_a_participant');
+    }
+    const openSides: ("red" | "blue")[] = [
+      ...slots.filter(s => s.side === 'red' && s.player_id == null).length ? ['red' as const] : [],
+      ...slots.filter(s => s.side === 'blue' && s.player_id == null).length ? ['blue' as const] : [],
+    ];
+    if (!openSides.length) {
+      throw new GambleError('There are no open seats left in this challenge', 'no_open_slot');
+    }
+    const side = claimSide ?? (openSides.length === 1 ? openSides[0] : undefined);
+    if (!side) {
+      throw new GambleError(
+        `Open seats on both sides — say which you are taking (red or blue)`,
+        'no_open_slot'
+      );
+    }
+    if (!openSides.includes(side)) {
+      throw new GambleError(`There are no open seats on the ${side} side`, 'no_open_slot');
+    }
+    db.transaction(() => {
+      const target = db.prepare(`
+        SELECT id FROM challenge_slots
+        WHERE challenge_id = ? AND side = ? AND player_id IS NULL
+        ORDER BY slot_index ASC LIMIT 1
+      `).get(challengeId, side) as { id: number } | undefined;
+      if (!target) throw new GambleError('That seat was just taken — no open seat left', 'no_open_slot');
+      // The IS-NULL guard is belt and braces against a racing claim.
+      const upd = db.prepare(`
+        UPDATE challenge_slots SET player_id = ?, accepted_at = ? WHERE id = ? AND player_id IS NULL
+      `).run(playerId, nowDbDate(), target.id);
+      if (upd.changes === 0) {
+        throw new GambleError('That seat was just taken', 'no_open_slot');
+      }
+    })();
+  }
+
+  slots = getChallengeSlots(challengeId);
+  const openSeats = slots.filter(s => s.player_id == null);
+  const unaccepted = slots.filter(s => s.player_id != null && !s.accepted_at);
+  if (openSeats.length > 0 || unaccepted.length > 0) {
+    // Still filling — nothing is owed until the shape completes.
+    return { challenge: getChallenge(challengeId)! };
+  }
+
+  // ---- completion: full teams known — freeze odds, debit everyone, open ----
+  const game = db.prepare(`SELECT score_value FROM games WHERE id = ?`)
+    .get(challenge.game_id) as { score_value: number };
+  const fee = challenge.entry_fee;
+  const redPlayerIds = slots.filter(s => s.side === 'red').map(s => s.player_id!) as number[];
+  const bluePlayerIds = slots.filter(s => s.side === 'blue').map(s => s.player_id!) as number[];
+  const allPlayerIds = Array.from(new Set([...redPlayerIds, ...bluePlayerIds]));
+
+  // Funds checked before the transaction so the error never half-moves money.
+  for (const pid of allPlayerIds) {
+    assertBankLinked(pid);
+    bank.ensureAccount(pid);
+    if (bank.getBalance(pid) < fee) {
+      throw new GambleError(`Player ${pid} does not have ${fee} moose bucks to enter`, 'insufficient_funds');
+    }
+  }
+
+  const ladder = computeOddsLadder({
+    gameId: challenge.game_id,
+    redPlayerIds,
+    bluePlayerIds,
+    total: game.score_value,
+  });
+  const betCloseMs = new Date(challenge.scheduled_at.replace(' ', 'T') + 'Z').getTime()
+    - GAMBLE_RULES.betCloseLeadMinutes * 60_000;
+  const betCloseAt = toDbDate(new Date(betCloseMs));
+
+  const gambleMatchId = db.transaction((): number => {
+    // Claim first: only the FIRST completion may open a match — a racing
+    // second acceptor must not double-debit every seat or open two matches.
+    const claim = db.prepare(`
+      UPDATE challenges SET status = 'accepted', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND status IN ('pending', 'countered')
+    `).run(challengeId);
+    if (claim.changes === 0) {
+      throw new GambleError('Challenge is already accepted', 'not_negotiable');
+    }
+    for (const pid of allPlayerIds) {
+      bank.debitChecked(pid, fee, { type: 'challenge_fee', id: challengeId, memo: 'entry fee' });
+    }
+
+    const result = db.prepare(`
+      INSERT INTO gamble_matches
+        (challenge_id, game_id, red_player_id, blue_player_id, scheduled_at, bet_close_at, entry_fee, outcome_total, odds_json, status, payout_line, special_rules)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+    `).run(
+      challengeId, challenge.game_id, redPlayerIds[0], bluePlayerIds[0],
+      challenge.scheduled_at, betCloseAt, fee, game.score_value, JSON.stringify(ladder),
+      challenge.payout_line ?? 'true_even', challenge.special_rules ?? null
+    );
+    const gmId = result.lastInsertRowid as number;
+
+    const seat = db.prepare(
+      `INSERT OR IGNORE INTO gamble_match_participants (gamble_match_id, team, player_id) VALUES (?, ?, ?)`
+    );
+    redPlayerIds.forEach((pid, i) => seat.run(gmId, 0, pid));
+    bluePlayerIds.forEach((pid, i) => seat.run(gmId, 1, pid));
+
+    db.prepare(`UPDATE challenges SET gamble_match_id = ? WHERE id = ?`).run(gmId, challengeId);
+    return gmId;
+  })();
+
+  // Money moved — push the entry-fee movements toward the central bank.
+  kickBankSync();
+
+  return {
+    challenge: getChallenge(challengeId)!,
+    gambleMatch: getGambleMatch(gambleMatchId),
+    ladder,
+  };
 }
 
 export function getChallenge(id: number): Challenge | undefined {
@@ -496,7 +780,42 @@ export function getGambleMatch(id: number): GambleMatch | undefined {
     WHERE gm.id = ?
   `).get(id) as GambleMatch | undefined;
   if (!row) return undefined;
-  return { ...row, odds: JSON.parse(row.odds_json) as OddsLadder };
+  return { ...row, odds: JSON.parse(row.odds_json) as OddsLadder, participants: getGambleParticipants(id) };
+}
+
+// ---------------------------------------------------------------------------
+// Teams: rosters (gamble matches) and slots (challenges)
+// ---------------------------------------------------------------------------
+
+/** Full roster of a gamble match: team 0 = red, 1 = blue, in seat order.
+ *  Legacy 1v1s are backfilled into this table at boot, so this is always
+ *  complete — the red/blue columns remain mirrored first seats. */
+export function getGambleParticipants(gambleMatchId: number): GambleMatchPlayer[] {
+  return db.prepare(`
+    SELECT mp.team, mp.player_id, pl.name as player_name
+    FROM gamble_match_participants mp
+    JOIN players pl ON pl.id = mp.player_id
+    WHERE mp.gamble_match_id = ?
+    ORDER BY mp.team, mp.id
+  `).all(gambleMatchId) as GambleMatchPlayer[];
+}
+
+/** Seats of a team challenge in red-then-blue seat order. A NULL player_id is
+ *  an open broadcast slot; a non-maker seat with accepted_at NULL still needs
+ *  its player to accept. Legacy 1v1 challenges return []. */
+export function getChallengeSlots(challengeId: number): ChallengeSlot[] {
+  return db.prepare(`
+    SELECT s.*, p.name as player_name
+    FROM challenge_slots s
+    LEFT JOIN players p ON p.id = s.player_id
+    WHERE s.challenge_id = ?
+    ORDER BY CASE s.side WHEN 'red' THEN 0 ELSE 1 END, s.slot_index
+  `).all(challengeId) as ChallengeSlot[];
+}
+
+function challengeHasSlots(challengeId: number): boolean {
+  return (db.prepare(`SELECT COUNT(*) as n FROM challenge_slots WHERE challenge_id = ?`)
+    .get(challengeId) as { n: number }).n > 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -519,7 +838,10 @@ export function placeBet(gambleMatchId: number, bettorId: number, redScore: numb
   if (Date.now() >= new Date(gm.bet_close_at.replace(' ', 'T') + 'Z').getTime()) {
     throw new GambleError(`Bets are closed — the window shut at ${gm.bet_close_at} UTC`, 'bets_closed');
   }
-  if (bettorId === gm.red_player_id || bettorId === gm.blue_player_id) {
+  // Participant exclusion across the WHOLE roster (team gambles included).
+  const bettorSeated = getGambleParticipants(gambleMatchId)
+    .some(p => p.player_id === bettorId);
+  if (bettorSeated) {
     throw new GambleError('Players may not bet on their own match (match-fixing guard)', 'participants_may_not_bet');
   }
   if (!Number.isInteger(stake) || stake < GAMBLE_RULES.minStake) {
@@ -620,15 +942,22 @@ export function settleGambleMatch(
   const gm = getGambleMatch(gambleMatchId);
   if (!gm) throw new GambleError('Gamble match not found', 'not_found');
 
+  const roster = getGambleParticipants(gambleMatchId);
+  if (!roster.length) throw new GambleError('Gamble match has no roster', 'not_found');
+  const rosterRed = roster.filter(p => p.team === 0).map(p => p.player_id);
+  const rosterBlue = roster.filter(p => p.team === 1).map(p => p.player_id);
   const redTeam = teams.find(t => t.team === 0);
   const blueTeam = teams.find(t => t.team === 1);
-  if (!redTeam || !blueTeam || redTeam.player_ids.length !== 1 || blueTeam.player_ids.length !== 1) {
-    throw new GambleError('Provide both teams (team 0 = red, team 1 = blue) with one player each', 'bad_teams');
+  if (!redTeam || !blueTeam) {
+    throw new GambleError('Provide both teams (team 0 = red, team 1 = blue)', 'bad_teams');
   }
-  const [redPlayerId, bluePlayerId] = [redTeam.player_ids[0], blueTeam.player_ids[0]];
-  if (redPlayerId !== gm.red_player_id || bluePlayerId !== gm.blue_player_id) {
+  const sameSeats = (a: number[], b: number[]) =>
+    a.length === b.length && [...a].sort((x, y) => x - y).every((v, i) => v === [...b].sort((x, y) => x - y)[i]);
+  if (!sameSeats(redTeam.player_ids, rosterRed) || !sameSeats(blueTeam.player_ids, rosterBlue)) {
     throw new GambleError('Teams do not match the gamble match participants', 'teams_mismatch');
   }
+  const redPlayerId = redTeam.player_ids[0];
+  const bluePlayerId = blueTeam.player_ids[0];
 
   const redScore = redTeam.score;
   const blueScore = blueTeam.score;
@@ -647,9 +976,10 @@ export function settleGambleMatch(
   }
 
   const settle = db.transaction((): SettleSummary => {
-    // Payouts go to both players as real central-bank transfers
-    assertBankLinked(redPlayerId);
-    assertBankLinked(bluePlayerId);
+    // Payouts go to every rostered player as real central-bank transfers
+    for (const pid of new Set(roster.map(p => p.player_id))) {
+      assertBankLinked(pid);
+    }
     // Check-and-set claim: only the first settle wins, repeats error out.
     const claim = db.prepare(`
       UPDATE gamble_matches SET status = 'settled', settled_at = ?
@@ -724,7 +1054,7 @@ export function settleGambleMatch(
     //    by default, or 'elo_even' / a custom '7-3'-style line), in which
     //    case the entry splits 50/50. The match still has a winner and the
     //    pot logic stays score-based; only the entry payout goes even.
-    const entriesPool = 2 * gm.entry_fee;
+    const entriesPool = gm.entry_fee * roster.length;
     const houseFee = Math.floor(entriesPool * GAMBLE_RULES.houseFeeRate);
     if (houseFee > 0) {
       bank.credit(null, houseFee, { type: 'house_fee', id: gambleMatchId, memo: '10% house fee on entries' });
@@ -738,27 +1068,48 @@ export function settleGambleMatch(
     const entryEvenHit = evenScoreline !== ''
       ? `${redScore}-${blueScore}` === evenScoreline
       : redScore === blueScore;
-    const participants: { playerId: number; score: number }[] = [
-      { playerId: redPlayerId, score: redScore },
-      { playerId: bluePlayerId, score: blueScore },
-    ];
+    const participants: { playerId: number; score: number }[] = roster.map(p => ({
+      playerId: p.player_id,
+      score: p.team === 0 ? redScore : blueScore,
+    }));
     const playerEntry: SettleSummary['playerEntry'] = [];
     let sharesTotal = 0;
-    for (const { playerId, score } of participants) {
-      const returned = entryEvenHit
-        ? Math.floor(playersPool / 2)
-        : Math.floor((playersPool * score) / gm.outcome_total);
-      sharesTotal += returned;
-      if (returned > 0) {
-        bank.credit(playerId, returned, {
-          type: 'player_share',
-          id: gambleMatchId,
-          memo: entryEvenHit
-            ? `evens-line payout (line ${line}) — half of ${playersPool}`
-            : `entry share ${score}/${gm.outcome_total} of ${playersPool} (${Math.round(GAMBLE_RULES.houseFeeRate * 100)}% of ${gm.entry_fee} entry)`,
-        });
+    // Team-aware entries: each side's pool slice is playersPool × that side's
+    // score / total, split EVENLY among the side's members — for 1v1s (one
+    // member per side) this is exactly the historical per-player share. The
+    // per-member floors keep every side's slice intact; dust stays with the
+    // house via the leftover identity below.
+    if (entryEvenHit) {
+      const per = Math.floor(playersPool / roster.length);
+      for (const { playerId } of participants) {
+        sharesTotal += per;
+        if (per > 0) {
+          bank.credit(playerId, per, {
+            type: 'player_share',
+            id: gambleMatchId,
+            memo: `evens-line payout (line ${line}) — ${roster.length} way split of ${playersPool}`,
+          });
+        }
+        playerEntry.push({ playerId, fee: gm.entry_fee, returned: per });
       }
-      playerEntry.push({ playerId, fee: gm.entry_fee, returned });
+    } else {
+      for (const team of [0, 1] as const) {
+        const teamScore = team === 0 ? redScore : blueScore;
+        const members = participants.filter((_, i) => roster[i].team === team);
+        const slice = Math.floor((playersPool * teamScore) / gm.outcome_total);
+        const per = members.length ? Math.floor(slice / members.length) : 0;
+        for (const m of members) {
+          sharesTotal += per;
+          if (per > 0) {
+            bank.credit(m.playerId, per, {
+              type: 'player_share',
+              id: gambleMatchId,
+              memo: `entry share ${teamScore}/${gm.outcome_total} of ${playersPool} — ${members.length}-way team split (${Math.round(GAMBLE_RULES.houseFeeRate * 100)}% of ${gm.entry_fee} entry)`,
+            });
+          }
+          playerEntry.push({ playerId: m.playerId, fee: gm.entry_fee, returned: per });
+        }
+      }
     }
 
     // 4. The pot = everything banked (stakes + both entry fees) minus what
@@ -775,6 +1126,7 @@ export function settleGambleMatch(
     let houseCut = leftover > 0 ? Math.floor(leftover * GAMBLE_RULES.potSplit.house) : 0;
     let winnerShare = 0;
     let winnerPlayerId: number | null = null;
+    const winnersCredited: number[] = [];
     let houseLoss = 0;
     const scoreShares: { playerId: number; amount: number }[] = [];
     const winnerQuarter = Math.floor(leftover * GAMBLE_RULES.potSplit.winner);
@@ -782,21 +1134,38 @@ export function settleGambleMatch(
     const isDraw = redScore === blueScore;
 
     if (leftover > 0) {
-      winnerPlayerId = isDraw ? null : (redScore > blueScore ? redPlayerId : bluePlayerId);
-      if (winnerPlayerId !== null && winnerQuarter > 0) {
-        bank.credit(winnerPlayerId, winnerQuarter, { type: 'pot_winner_share', id: gambleMatchId, memo: 'match winner pot share' });
-        winnerShare = winnerQuarter;
+      // Winner quarter goes to the WINNING TEAM, split EVENLY between its
+      // members (single winner for 1v1s — same numbers as before); the
+      // floored per-player amounts' dust lands on the house via houseCut.
+      const winnerIds = isDraw
+        ? []
+        : (redScore > blueScore ? rosterRed : rosterBlue);
+      const perWinner = winnerIds.length ? Math.floor(winnerQuarter / winnerIds.length) : 0;
+      for (const pid of winnerIds) {
+        if (perWinner > 0) {
+          bank.credit(pid, perWinner, { type: 'pot_winner_share', id: gambleMatchId, memo: 'match winner pot share (even team split)' });
+          winnersCredited.push(pid);
+        }
       }
+      winnerShare = perWinner * winnersCredited.length;
+      winnerPlayerId = winnerIds[0] ?? null;
       // On a draw the winner quarter keeps the houseCut value above.
 
       let scoreShareTotal = 0;
-      for (let i = 0; i < participants.length; i++) {
-        const amount = Math.floor((scoreQuarter * participants[i].score) / gm.outcome_total);
-        if (amount > 0) {
-          bank.credit(participants[i].playerId, amount, { type: 'pot_score_share', id: gambleMatchId, memo: 'pot score share' });
+      // Same team carve as the entry shares: a side's quarter slice is
+      // scoreQuarter × its score / total, split evenly within the side.
+      for (const team of [0, 1] as const) {
+        const teamScore = team === 0 ? redScore : blueScore;
+        const members = participants.filter((_, i) => roster[i].team === team);
+        const slice = Math.floor((scoreQuarter * teamScore) / gm.outcome_total);
+        const per = members.length ? Math.floor(slice / members.length) : 0;
+        for (const m of members) {
+          if (per > 0) {
+            bank.credit(m.playerId, per, { type: 'pot_score_share', id: gambleMatchId, memo: 'pot score share (even team split)' });
+          }
+          scoreShares.push({ playerId: m.playerId, amount: per });
+          scoreShareTotal += per;
         }
-        scoreShares.push({ playerId: participants[i].playerId, amount });
-        scoreShareTotal += amount;
       }
 
       // House takes whatever the floored shares didn't eat — the base 50%
@@ -833,6 +1202,7 @@ export function settleGambleMatch(
         house: houseCut,
         houseFee,
         winnerPlayerId,
+        winnerPlayerIds: winnersCredited,
         winnerShare,
         scoreShares,
         houseLoss,
@@ -888,9 +1258,11 @@ export function getSettleSummary(gambleMatchId: number): SettleSummary | null {
       SELECT team, score FROM match_participants
       WHERE match_id = ? AND team IN (0, 1) ORDER BY team`)
       .all(gm.match_id) as { team: number; score: number }[];
-    if (parts.length === 2) {
-      redScore = parts[0].score;
-      blueScore = parts[1].score;
+    // A recorded team gamble carries one row per player — both rows of a
+    // team share the team's score, so take the first of each side.
+    if (parts.some(p => p.team === 0) && parts.some(p => p.team === 1)) {
+      redScore = parts.find(p => p.team === 0)!.score;
+      blueScore = parts.find(p => p.team === 1)!.score;
     }
   }
 
@@ -902,17 +1274,27 @@ export function getSettleSummary(gambleMatchId: number): SettleSummary | null {
     ? `${redScore}-${blueScore}` === evenScoreline
     : redScore === blueScore;
 
-  const participants: { playerId: number | null; score: number }[] = [
-    { playerId: gm.red_player_id, score: redScore },
-    { playerId: gm.blue_player_id, score: blueScore },
-  ];
+  const roster = getGambleParticipants(gambleMatchId);
+  const participants: { playerId: number | null; score: number; side: 'red' | 'blue' }[] =
+    roster.length ? roster.map(p => ({
+      playerId: p.player_id,
+      score: p.team === 0 ? redScore : blueScore,
+      side: p.team === 0 ? 'red' : 'blue',
+    })) : [
+      { playerId: gm.red_player_id, score: redScore, side: 'red' as const },
+      { playerId: gm.blue_player_id, score: blueScore, side: 'blue' as const },
+    ];
   const playerEntry = participants.map(p => ({
     playerId: p.playerId ?? -1,
     fee: gm.entry_fee,
     returned: ledger.find(l => l.ref_type === 'player_share' && l.player_id === p.playerId)?.amount ?? 0,
   }));
 
-  const winnerRow = ledger.find(l => l.ref_type === 'pot_winner_share' && l.amount !== 0);
+  // Winner share: one ledger row per winning player (team gambles split the
+  // quarter evenly, so several rows with the same amount).
+  const winnerRows = ledger.filter(l => l.ref_type === 'pot_winner_share' && l.amount !== 0);
+  const winnerShare = winnerRows.reduce((s, r) => s + r.amount, 0);
+  const winnerPlayerIds = winnerRows.map(r => r.player_id ?? -1);
   const scoreShares = participants.map(p => ({
     playerId: p.playerId ?? -1,
     amount: ledger.find(l => l.ref_type === 'pot_score_share' && l.player_id === p.playerId)?.amount ?? 0,
@@ -921,8 +1303,8 @@ export function getSettleSummary(gambleMatchId: number): SettleSummary | null {
   const houseLoss = Math.abs(ledger.find(l => l.ref_type === 'house_loss')?.amount ?? 0);
   const leftover = houseLoss > 0
     ? -houseLoss
-    : houseCut > 0 || (winnerRow?.amount ?? 0) > 0 || scoreShares.some(s => s.amount > 0)
-      ? (winnerRow?.amount ?? 0) + scoreShares.reduce((s, x) => s + x.amount, 0) + houseCut
+    : houseCut > 0 || winnerShare > 0 || scoreShares.some(s => s.amount > 0)
+      ? winnerShare + scoreShares.reduce((s, x) => s + x.amount, 0) + houseCut
       : 0;
 
   return {
@@ -948,8 +1330,9 @@ export function getSettleSummary(gambleMatchId: number): SettleSummary | null {
       positive: leftover > 0,
       house: houseCut,
       houseFee,
-      winnerPlayerId: winnerRow?.player_id ?? null,
-      winnerShare: winnerRow?.amount ?? 0,
+      winnerPlayerId: winnerPlayerIds[0] ?? null,
+      winnerPlayerIds,
+      winnerShare,
       scoreShares,
       houseLoss,
     },
@@ -997,47 +1380,51 @@ export function correctGambleScore(
     throw new GambleError(`Scores must be whole numbers summing to ${gm.outcome_total}`, 'bad_score');
   }
 
-  // What the old recorded match said (for the summary/notification)
+  // What the old recorded match said (for the summary/notification) — one row
+  // per player for team gambles, both rows of a team share its score.
   const oldParts = db.prepare(`
-    SELECT team, score FROM match_participants WHERE match_id = ? AND team IN (0, 1) ORDER BY team
-  `).all(gm.match_id) as { team: number; score: number }[];
-  const recordedStillExists = oldParts.length === 2;
+    SELECT team, player_id, score FROM match_participants WHERE match_id = ? AND team IN (0, 1) ORDER BY team, id
+  `).all(gm.match_id) as { team: number; player_id: number; score: number }[];
+  const recordedStillExists = oldParts.some(p => p.team === 0) && oldParts.some(p => p.team === 1);
   const previousScore: { red: number | null; blue: number | null } = recordedStillExists
-    ? { red: oldParts[0].score, blue: oldParts[1].score }
+    ? { red: oldParts.find(p => p.team === 0)!.score, blue: oldParts.find(p => p.team === 1)!.score }
     : { red: null, blue: null };
 
   // Dangling match_id? The office match-history edit (correctMatch) DELETES
   // and re-creates the match row under a fresh id — its Elo/achievements are
   // already correct, so all that's left here is re-pointing the gamble at the
   // re-created match and re-marking the bets (NO Elo work, NO bank rows).
+  const roster = getGambleParticipants(gambleMatchId);
   let targetMatchId = gm.match_id;
   let recordedScores: { red: number; blue: number } | null = recordedStillExists
-    ? { red: oldParts[0].score, blue: oldParts[1].score } : null;
+    ? { red: oldParts.find(p => p.team === 0)!.score, blue: oldParts.find(p => p.team === 1)!.score } : null;
   if (!recordedStillExists) {
     // Identify the re-created match: the settle defaults its notes to
     // 'gamble #<id>' (preserved verbatim by correctMatch), played_at is the
-    // original settle moment (≈ settled_at), it's flagged is_edited, and
-    // carries exactly red@team0 + blue@team1.
+    // original settle moment (≈ settled_at), it's flagged is_edited, and it
+    // carries the gamble's exact roster (any team shapes).
     const candidates = db.prepare(`
       SELECT m.id, m.played_at, m.notes,
-        GROUP_CONCAT(mp.team || ':' || mp.score) as teams
+        GROUP_CONCAT(mp.team || ':' || mp.player_id || ':' || mp.score) as teams
       FROM matches m
       JOIN match_participants mp ON mp.match_id = m.id
       WHERE m.game_id = ?
         AND m.id > ?
         AND m.is_edited = 1
         AND ABS(strftime('%s', m.played_at) - strftime('%s', ?)) < 600
-        AND (SELECT COUNT(*) FROM match_participants c WHERE c.match_id = m.id) = 2
       GROUP BY m.id
       ORDER BY m.id ASC
     `).all(gm.game_id, gm.match_id, gm.settled_at ?? '') as
       { id: number; played_at: string; notes: string | null; teams: string }[];
+    const rosterSet = roster.map(p => p.player_id).sort((a, b) => a - b).join(',');
     const found = candidates
       .map(c => ({ ...c, scores: c.teams.split(',').map(t => t.split(':').map(Number)) }))
       .find(c => {
         const red = c.scores.find(s => s[0] === 0);
         const blue = c.scores.find(s => s[0] === 1);
-        return red && blue && c.scores.length === 2;
+        if (!red || !blue) return false;
+        const playerSet = c.scores.map(s => s[1]).sort((a, b) => a - b).join(',');
+        return playerSet === rosterSet;
       });
     if (!found) {
       throw new GambleError(
@@ -1045,8 +1432,8 @@ export function correctGambleScore(
         'recorded_match_missing'
       );
     }
-    const foundRed = found.scores.find(s => s[0] === 0)![1];
-    const foundBlue = found.scores.find(s => s[0] === 1)![1];
+    const foundRed = found.scores.find(s => s[0] === 0)![2];
+    const foundBlue = found.scores.find(s => s[0] === 1)![2];
     if (foundRed !== redScore || foundBlue !== blueScore) {
       throw new GambleError(
         `A match-history edit has already re-recorded this settle as ${foundRed}-${foundBlue} (match #${found.id}). Re-run the correction with those scores: ${foundRed} ${foundBlue}`,
@@ -1065,9 +1452,10 @@ export function correctGambleScore(
   //    target (already verified above) is used as-is.
   let newMatchId: number | null = targetMatchId;
   if (recordedStillExists && recordedScores) {
+    // Replay with the gamble's roster (team gambles: multiple ids per team).
     const oldToNew = correctMatch(gm.match_id, [
-      { team: 0, player_ids: [gm.red_player_id], score: recordedScores.red },
-      { team: 1, player_ids: [gm.blue_player_id], score: recordedScores.blue },
+      { team: 0, player_ids: roster.filter(p => p.team === 0).map(p => p.player_id), score: recordedScores.red },
+      { team: 1, player_ids: roster.filter(p => p.team === 1).map(p => p.player_id), score: recordedScores.blue },
     ]);
     newMatchId = oldToNew.get(gm.match_id) ?? null;
   }
@@ -1123,18 +1511,22 @@ export function correctGambleScore(
   };
 }
 
-/** Refund everything on a cancel: open bet stakes + both entry fees.
- *  Returns the total refunded (also used by the overdue auto-void). */
+/** Refund everything on a cancel: open bet stakes + one entry fee per roster
+ *  seat. Returns the total refunded (also used by the overdue auto-void). */
 export function cancelGambleMatch(gambleMatchId: number): number {
   const gm = getGambleMatch(gambleMatchId);
   if (!gm) throw new GambleError('Gamble match not found', 'not_found');
   if (gm.status === 'settled') throw new GambleError('Match already settled', 'already_settled');
   if (gm.status === 'cancelled') throw new GambleError('Match already cancelled', 'already_cancelled');
 
+  const seats = Array.from(new Set(getGambleParticipants(gambleMatchId).map(p => p.player_id)));
+  if (!seats.length) seats.push(gm.red_player_id, gm.blue_player_id); // pre-backfill safety net
+
   const refunded = db.transaction((): number => {
-    let refunded = gm.entry_fee * 2;
-    bank.credit(gm.red_player_id, gm.entry_fee, { type: 'refund', id: gambleMatchId, memo: 'entry fee refund' });
-    bank.credit(gm.blue_player_id, gm.entry_fee, { type: 'refund', id: gambleMatchId, memo: 'entry fee refund' });
+    let refunded = gm.entry_fee * seats.length;
+    for (const pid of seats) {
+      bank.credit(pid, gm.entry_fee, { type: 'refund', id: gambleMatchId, memo: 'entry fee refund' });
+    }
 
     const openBets = db.prepare(`SELECT * FROM bets WHERE gamble_match_id = ? AND status = 'open'`)
       .all(gambleMatchId) as Bet[];

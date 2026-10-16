@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { useMe } from '@/lib/contexts/MeContext';
 import { GambleOddsBoard } from '@/components/GambleOddsBoard';
 import { betsClosingSoon, formatBetsCountdown } from '@/lib/betsClock';
-import type { BankTransaction, Bet, GambleMatch, ScoreOutcome, SettleSummary } from '@/lib/types';
+import type { BankTransaction, Bet, GambleMatch, GambleMatchPlayer, ScoreOutcome, SettleSummary } from '@/lib/types';
 
 // Gamble match detail: countdown + odds board + bet form for others, score
 // entry for the two players, full settlement view once done.
@@ -20,6 +20,8 @@ interface Detail {
   final_score: { red: number; blue: number } | null;
   /** Ledger-reconstructed settlement, present once the gamble is settled. */
   summary?: SettleSummary | null;
+  /** Full roster — team gambles have more than two seats. */
+  participants?: GambleMatchPlayer[];
   my_bets: Bet[];
   my_staked: number;
   is_participant: boolean;
@@ -127,11 +129,13 @@ export default function GambleMatchPage() {
 
   async function enterScore() {
     if (!me || !detail) return;
-    const redName = detail.match.red_player_name ?? 'Red player';
-    const blueName = detail.match.blue_player_name ?? 'Blue player';
+    const roster = detail.participants ?? [];
+    const seatCount = Math.max(2, roster.length);
+    const redSide = roster.filter(p => p.team === 0).map(p => p.player_name ?? `Player ${p.player_id}`).join(' & ') || 'Red';
+    const blueSide = roster.filter(p => p.team === 1).map(p => p.player_name ?? `Player ${p.player_id}`).join(' & ') || 'Blue';
     if (!confirm(
-      `Is ${redName} ${scoreRed}–${scoreBlue} ${blueName} the correct score?\n\n` +
-      'This records the match, settles every bet and pays out — it cannot be undone.',
+      `Is ${redSide} ${scoreRed}–${scoreBlue} ${blueSide} the correct score?\n\n` +
+      `This records the match, settles every bet and pays out ${seatCount} players' entries — it cannot be undone.`,
     )) return;
     setBusy(true);
     setError(null);
@@ -155,10 +159,12 @@ export default function GambleMatchPage() {
 
   async function cancelMatch() {
     if (!me || !detail) return;
-    const refundTotal = 2 * detail.match.entry_fee + detail.pool;
+    const roster = detail.participants ?? [];
+    const seatCount = Math.max(2, roster.length);
+    const refundTotal = detail.match.entry_fee * seatCount + detail.pool;
     if (!confirm(
       `Cancel this gamble? ${detail.bets.length} bet${detail.bets.length === 1 ? '' : 's'} totalling ${detail.pool} bucks ` +
-      `will be refunded, plus both ${detail.match.entry_fee}-buck entry fees (${refundTotal} total).\n\n` +
+      `will be refunded, plus all ${seatCount} entry fees (${detail.match.entry_fee} each — ${refundTotal} total).\n\n` +
       'The challenge closes as cancelled — it cannot be undone.',
     )) return;
     setBusy(true);
@@ -187,7 +193,17 @@ export default function GambleMatchPage() {
   const gm = detail.match;
   const ladder: ScoreOutcome[] = gm.odds?.outcomes ?? [];
   const predicted = gm.odds?.predictedLine;
-  const isRed = me?.id === gm.red_player_id;
+  // Team gambles: full rosters (1v2, 2v2…); legacy 1v1s still come through as
+  // a two-seat roster, so everything below is shape-agnostic.
+  const roster = detail.participants ?? [];
+  const redSeatCount = roster.filter(p => p.team === 0).length;
+  const blueSeatCount = roster.filter(p => p.team === 1).length;
+  const shape = roster.length > 2 ? ` (${redSeatCount}v${blueSeatCount})` : '';
+  const sideNames = (team: 0 | 1, fallback: string) =>
+    roster.filter(p => p.team === team).map(p => p.player_name ?? `Player ${p.player_id}`).join(' & ') || fallback;
+  const redSideName = sideNames(0, gm.red_player_name ?? 'Red');
+  const blueSideName = sideNames(1, gm.blue_player_name ?? 'Blue');
+  const isRed = Number.isInteger(me?.id) && roster.some(p => p.player_id === me!.id && p.team === 0);
   const status = detail.derived_status;
 
   return (
@@ -216,14 +232,14 @@ export default function GambleMatchPage() {
         </div>
         <div className="flex items-center gap-3 text-xl font-bold">
           <span className={isRed ? 'underline decoration-red-400' : ''}>
-            <span className="text-red-600">{gm.red_player_name}</span>
+            <span className="text-red-600">{redSideName}</span>
           </span>
           <span className="text-gray-400 text-base">vs</span>
-          <span className="text-blue-600">{gm.blue_player_name}</span>
-          <span className="text-gray-400 text-base">· {gm.game_name}</span>
+          <span className="text-blue-600">{blueSideName}</span>
+          <span className="text-gray-400 text-base">· {gm.game_name}{shape}</span>
         </div>
         <div className="text-sm text-gray-500 mt-1">
-          {fmtTime(gm.scheduled_at)} · entry {gm.entry_fee} each · bookie's line{' '}
+          {fmtTime(gm.scheduled_at)} · entry {gm.entry_fee} each{roster.length > 2 ? ` · ${roster.length} players (${redSeatCount}v${blueSeatCount})` : ''} · bookie's line{' '}
           <span className="text-amber-600 font-semibold">{predicted}</span>
         </div>
         <div className="text-sm text-gray-500">
@@ -431,22 +447,35 @@ function SettledView({ gm, bets, summary, finalScore }: { gm: GambleMatch; bets:
   const pool = won.reduce((s, b) => s + b.stake, 0) + lost.reduce((s, b) => s + b.stake, 0);
   const returns = won.reduce((s, b) => s + (b.payout ?? 0), 0);
 
-  // Per-player payout: what each participant paid in (entry fee) and what
-  // came back (entry share + pot shares), with a coloured net total — the
-  // same won/lost clarity the bet list has. The API reconstructs the
-  // settlement from the bank ledger, so this shows for reloaded pages too.
+  // Per-PLAYER payout across the whole roster (1v1s and any team shape): what
+  // each participant paid in (entry fee) and what came back (entry share + pot
+  // shares), with a coloured net total — the API reconstructs the settlement
+  // from the bank ledger, so this shows for reloaded pages too. Winner shares
+  // are split evenly, so per player it's the quarter over the team size.
+  const roster = gm.participants?.length ? gm.participants : [
+    { team: 0, player_id: gm.red_player_id, player_name: gm.red_player_name ?? 'Red player' },
+    { team: 1, player_id: gm.blue_player_id, player_name: gm.blue_player_name ?? 'Blue player' },
+  ];
+  const perWinner = summary?.pot.winnerPlayerIds?.length
+    ? Math.floor((summary.pot.winnerShare ?? 0) / summary.pot.winnerPlayerIds.length)
+    : 0;
+  const sideNames = (team: 0 | 1, fallback: string) =>
+    roster.filter(p => p.team === team).map(p => p.player_name ?? `Player ${p.player_id}`).join(' & ') || fallback;
   const entrySplitNote = summary
     ? (summary.entryEvenHit
       ? `evens line hit (${summary.payoutLine}) — 50/50 entry split`
       : `entries split by score${summary.payoutLine && summary.payoutLine !== 'true_even' && summary.payoutLine !== 'elo_even' ? ` (line was ${summary.payoutLine})` : ''}`)
     : null;
-  const playerCards = ([
-    { id: gm.red_player_id, name: gm.red_player_name ?? 'Red player', colour: 'text-red-600', bg: 'bg-red-50', border: 'border-red-100' },
-    { id: gm.blue_player_id, name: gm.blue_player_name ?? 'Blue player', colour: 'text-blue-600', bg: 'bg-blue-50', border: 'border-blue-100' },
-  ]).map(p => {
+  const playerCards = roster.map(p => ({
+    id: p.player_id,
+    name: p.player_name ?? `Player ${p.player_id}`,
+    colour: p.team === 0 ? 'text-red-600' : 'text-blue-600',
+    bg: p.team === 0 ? 'bg-red-50' : 'bg-blue-50',
+    border: p.team === 0 ? 'border-red-100' : 'border-blue-100',
+  })).map(p => {
     const entry = summary?.playerEntry.find(pe => pe.playerId === p.id);
     const scoreShare = summary?.pot.scoreShares.find(s => s.playerId === p.id)?.amount ?? 0;
-    const winnerShare = summary?.pot.winnerPlayerId === p.id ? (summary?.pot.winnerShare ?? 0) : 0;
+    const winnerShare = (summary?.pot.winnerPlayerIds?.includes(p.id) ?? false) ? perWinner : 0;
     const entryNet = entry ? entry.returned - entry.fee : null;
     const net = entryNet != null ? entryNet + scoreShare + winnerShare : null;
     return { ...p, entry, entryNet, scoreShare, winnerShare, net };
@@ -457,8 +486,8 @@ function SettledView({ gm, bets, summary, finalScore }: { gm: GambleMatch; bets:
   return (
     <div className="rounded-xl border border-gray-200 bg-card p-5 space-y-4">
       <div className="text-lg font-bold text-gray-900">
-        Final: <span className="text-red-600">{gm.red_player_name}</span> {summary?.finalScore.red ?? finalScore?.red ?? '?'}–{summary?.finalScore.blue ?? finalScore?.blue ?? '?'}{' '}
-        <span className="text-blue-600">{gm.blue_player_name}</span>
+        Final: <span className="text-red-600">{sideNames(0, gm.red_player_name ?? 'Red')}</span> {summary?.finalScore.red ?? finalScore?.red ?? '?'}–{summary?.finalScore.blue ?? finalScore?.blue ?? '?'}{' '}
+        <span className="text-blue-600">{sideNames(1, gm.blue_player_name ?? 'Blue')}</span>
       </div>
 
       {gm.status === 'cancelled' ? (
@@ -523,7 +552,7 @@ function SettledView({ gm, bets, summary, finalScore }: { gm: GambleMatch; bets:
                 summary.pot.positive ? (
                   <div className="text-gray-800">
                     <div>house <b>{summary.pot.house}</b></div>
-                    <div>winner <b>{summary.pot.winnerShare}</b></div>
+                    <div>winner <b>{summary.pot.winnerShare}</b>{(summary.pot.winnerPlayerIds?.length ?? 1) > 1 ? ` (split ${summary.pot.winnerPlayerIds?.length} ways)` : ''}</div>
                     <div>score split <b>{summary.pot.scoreShares.map(s => s.amount).join(' / ')}</b></div>
                   </div>
                 ) : (

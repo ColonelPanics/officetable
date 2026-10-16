@@ -6,7 +6,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { revalidatePath } from 'next/cache';
-import { settleGambleMatch, getGambleMatch } from '@/lib/gamble';
+import { settleGambleMatch, getGambleMatch, getGambleParticipants } from '@/lib/gamble';
 import { announceSettled } from '@/lib/gambleNotifications';
 import { gambleErrorResponse, requirePlayerId, requireSessionPlayer } from '@/lib/gambleApi';
 
@@ -29,16 +29,25 @@ export async function POST(
 
     const gm = getGambleMatch(matchId);
     if (!gm) return NextResponse.json({ error: 'Gamble match not found' }, { status: 404 });
-    if (playerId !== gm.red_player_id && playerId !== gm.blue_player_id) {
+    const roster = getGambleParticipants(matchId);
+    if (!roster.some(p => p.player_id === playerId)) {
       return NextResponse.json(
-        { error: 'Only the two players may enter the result score' },
+        { error: 'Only a player in the gamble may enter the result score' },
         { status: 403 }
       );
     }
 
+    // Teams come from the roster itself (works for 1v1s and any team shape —
+    // red/blue scores are entered, the seats are known).
+    const redPlayerIds = roster.filter(p => p.team === 0).map(p => p.player_id);
+    const bluePlayerIds = roster.filter(p => p.team === 1).map(p => p.player_id);
+    if (!redPlayerIds.length || !bluePlayerIds.length) {
+      return NextResponse.json({ error: 'Gamble match has no roster' }, { status: 400 });
+    }
+
     const summary = settleGambleMatch(matchId, [
-      { team: 0, player_ids: [gm.red_player_id], score: redScore },
-      { team: 1, player_ids: [gm.blue_player_id], score: blueScore },
+      { team: 0, player_ids: redPlayerIds, score: redScore },
+      { team: 1, player_ids: bluePlayerIds, score: blueScore },
     ], body.notes ?? `gamble #${matchId}`);
 
     announceSettled(gm, summary).catch(err => console.error('gamble announce failed:', err));

@@ -4,7 +4,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import db from '@/lib/db';
-import { syncStatuses, deriveStatus, getBetPool } from '@/lib/gamble';
+import { syncStatuses, deriveStatus, getBetPool, getChallengeSlots } from '@/lib/gamble';
 import { getBank, isBankLinked } from '@/lib/bank';
 import { gambleErrorResponse } from '@/lib/gambleApi';
 import type { Challenge, GambleMatch, OddsLadder } from '@/lib/types';
@@ -37,13 +37,18 @@ export async function GET(request: NextRequest) {
 
     const bank = getBank();
 
-    // Challenges I'm part of that are still negotiable
+    // Challenges I'm part of that are still negotiable — direct membership or
+    // a seat in a team challenge.
     const myChallenges = Number.isInteger(playerId)
       ? db.prepare(`${CHALLENGE_SQL}
           WHERE c.status IN ('pending', 'countered')
-            AND (c.challenger_id = ? OR c.opponent_id = ?)
-          ORDER BY c.id DESC LIMIT 20`).all(playerId, playerId) as Challenge[]
+            AND (c.challenger_id = ? OR c.opponent_id = ?
+              OR EXISTS (SELECT 1 FROM challenge_slots s WHERE s.challenge_id = c.id AND s.player_id = ?))
+          ORDER BY c.id DESC LIMIT 20`).all(playerId, playerId, playerId) as Challenge[]
       : [];
+    for (const c of myChallenges) {
+      (c as Challenge & { slots?: unknown }).slots = getChallengeSlots(c.id);
+    }
 
     // Broadcast challenges: nobody picked, any non-challenger may accept
     const broadcasts = db.prepare(`${CHALLENGE_SQL}
@@ -51,6 +56,21 @@ export async function GET(request: NextRequest) {
         ${Number.isInteger(playerId) ? 'AND c.challenger_id != ?' : ''}
       ORDER BY c.id DESC LIMIT 10`)
       .all(...(Number.isInteger(playerId) ? [playerId] : [])) as Challenge[];
+
+    // Team challenges with open broadcast seats: anyone can claim a seat (the
+    // detail page handles the side choice — named seats need THEIR holder to
+    // accept too, so no direct accept button here).
+    const teamChallenges = db.prepare(`${CHALLENGE_SQL}
+      WHERE c.status IN ('pending', 'countered')
+        AND EXISTS (SELECT 1 FROM challenge_slots s WHERE s.challenge_id = c.id AND s.player_id IS NULL)
+        ${Number.isInteger(playerId) ? `
+        AND NOT EXISTS (SELECT 1 FROM challenge_slots s WHERE s.challenge_id = c.id AND s.player_id = ?)
+        AND c.challenger_id != ?` : ''}
+      ORDER BY c.id DESC LIMIT 10`)
+      .all(...(Number.isInteger(playerId) ? [playerId, playerId] : [])) as Challenge[];
+    for (const c of teamChallenges) {
+      (c as Challenge & { slots?: unknown }).slots = getChallengeSlots(c.id);
+    }
 
     // Public callouts: a DIRECT (non-broadcast) challenge that's still open is
     // visible to everyone — that's the callout. Only the named opponent can
@@ -98,6 +118,7 @@ export async function GET(request: NextRequest) {
       house_balance: bank.getHouseBalance(),
       my_challenges: myChallenges,
       broadcast_challenges: broadcasts,
+      team_challenges: teamChallenges,
       callouts,
       live_matches: live,
       settled_matches: settledRows.map(row => ({

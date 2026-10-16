@@ -287,14 +287,19 @@ export async function alcesServiceTransfer({ username, password, amount, type }:
       body: JSON.stringify({ username, password, serviceToken, amount, type }),
     });
   } catch (e) {
-    // A 404 on this endpoint can only mean the token resolves no service —
-    // surface it as a distinct, fixable condition instead of "account does
-    // not exist".
+    // Distinguish the two 404s this endpoint answers (probed): the TOKEN's
+    // 404 reads "No service with that token exists", while a missing PLAYER
+    // reads "No user with the username … exists". Only the first means every
+    // transfer will fail; the second is one unregistered account — the sync
+    // retries it once that account is registered on the bank.
     if (e instanceof AlcesBankError && e.code === 'not_found') {
-      throw new AlcesBankError(
-        'The bank does not recognise this site\'s service token — every transfer will fail. Fix ALCES_SERVICE_TOKEN (404 "No service with that token exists").',
-        'bad_service_token',
-      );
+      if (/No service/i.test(e.message)) {
+        throw new AlcesBankError(
+          'The bank does not recognise this site\'s service token — every transfer will fail. Fix ALCES_SERVICE_TOKEN (404 "No service with that token exists").',
+          'bad_service_token',
+        );
+      }
+      throw e;
     }
     throw e;
   }

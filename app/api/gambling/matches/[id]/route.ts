@@ -5,7 +5,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import db from '@/lib/db';
 import {
   getGambleMatch, getBets, getBetPool, deriveStatus, syncStatuses,
-  getSettleSummary,
+  getSettleSummary, getGambleParticipants,
 } from '@/lib/gamble';
 import { isWithinEditWindow } from '@/lib/elo';
 import { gambleErrorResponse } from '@/lib/gambleApi';
@@ -31,8 +31,10 @@ export async function GET(
     const bets = getBets(matchId);
     const pool = getBetPool(matchId);
 
-    const isParticipant = Number.isInteger(playerId)
-      && (playerId === gm.red_player_id || playerId === gm.blue_player_id);
+    // Full roster (team gambles have MORE than two seats; legacy 1v1s are
+    // backfilled into the same table).
+    const roster = getGambleParticipants(matchId);
+    const isParticipant = Number.isInteger(playerId) && roster.some(p => p.player_id === playerId);
     const myBets = Number.isInteger(playerId)
       ? bets.filter(b => b.bettor_id === playerId)
       : [];
@@ -49,7 +51,12 @@ export async function GET(
         SELECT team, score FROM match_participants
         WHERE match_id = ? AND team IN (0, 1) ORDER BY team`)
         .all(gm.match_id) as { team: number; score: number }[];
-      if (parts.length === 2) finalScore = { red: parts[0].score, blue: parts[1].score };
+      if (parts.some(p => p.team === 0) && parts.some(p => p.team === 1)) {
+        finalScore = {
+          red: parts.find(p => p.team === 0)!.score,
+          blue: parts.find(p => p.team === 1)!.score,
+        };
+      }
       const recorded = db.prepare(`SELECT played_at FROM matches WHERE id = ?`)
         .get(gm.match_id) as { played_at: string } | undefined;
       recordedPlayedAt = recorded?.played_at ?? null;
@@ -69,6 +76,7 @@ export async function GET(
       pool,
       final_score: finalScore,
       summary,
+      participants: roster,
       my_bets: myBets,
       my_staked: myBets.reduce((s, b) => s + b.stake, 0),
       is_participant: isParticipant,

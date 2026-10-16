@@ -43,7 +43,10 @@ export async function POST(
       };
     }
 
-    const result = respondToChallenge(challengeId, playerId, action, counter);
+    const result = respondToChallenge(
+      challengeId, playerId, action, counter,
+      body.claim_side === 'red' || body.claim_side === 'blue' ? body.claim_side : undefined
+    );
 
     if (action === 'accept' && result.gambleMatch && result.ladder) {
       announceBetsOpen(result.gambleMatch).catch(err => console.error('gamble announce failed:', err));
