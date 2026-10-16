@@ -201,7 +201,10 @@ export function Nav() {
               {!mounted ? (
                 // Mode is unknown pre-hydration (rendered server-side too)
                 <span className="block w-5 h-5" aria-hidden>🌗</span>
-              ) : currentMode === 'dark' || (currentMode === 'system' && resolvedTheme === 'dark') ? (
+              ) : currentMode === 'system' ? (
+                // Follows the OS — half-lit moon: could resolve to either ☀️ or 🌙
+                <span className="block w-5 h-5" aria-hidden>🌗</span>
+              ) : currentMode === 'dark' ? (
                 <span className="block w-5 h-5" aria-hidden>🌙</span>
               ) : (
                 <span className="block w-5 h-5" aria-hidden>☀️</span>
