@@ -27,9 +27,10 @@ export async function POST(request: NextRequest) {
     const cooldownRemainingMs = Math.max(0, RESYNC_COOLDOWN_MS - (now - lastResyncAt));
     if (cooldownRemainingMs === 0) {
       lastResyncAt = now;
-      // Re-arm failed rows AND 'unverified' ones. A re-armed unverified row
-      // still cannot blind-resend: the drainer verifies delivery against the
-      // recorded pre_balance snapshot before ever sending again.
+      // Re-arm failed rows AND legacy 'unverified' ones. There is no
+      // verification step any more: the drainer just re-sends whatever is
+      // queued, fire-and-forget, and the bank-truth resync absorbs anything
+      // the bank never accepted.
       const result = db.prepare(`
         UPDATE bank_sync SET status = 'pending', attempts = 0, error = NULL
         WHERE status IN ('failed', 'unverified')

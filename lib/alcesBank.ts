@@ -16,14 +16,19 @@
 //    password, serviceToken, amount, type}. They authenticate as the PLAYER
 //    and have NO recipient: the counterparty is OUR SERVICE'S POT, resolved
 //    from the token (readable via GET /services/{name}). `type` picks the
-//    direction — 'loss' = the player pays the pot (stake/debit), 'win' = the
-//    pot pays the player (payout/credit). The old
-//    POST /transactions/service/{username} is deprecated but still live.
+//    leg — 'hold' = the player's funds are committed to the pot as a
+//    refundable stake, 'return' = the hold released/handed back, 'win' =
+//    the pot pays the player (payout/credit), 'loss' = the player pays the
+//    pot outright. Per the bank manager: holds that resolve must become
+//    REAL legs in the ledger — released ('return') and then booked
+//    ('loss' of the stake / 'win' of the profit). That's how this site
+//    settles its gambles. The old POST /transactions/service/{username}
+//    is gone.
 //  - Fees: receipts into an account are skimmed and the skim shows up
-//    between ledger rows (NOT in a row's before/after) — ~1% under the new
-//    service endpoint (probed: a 20-buck receipt lost 0.2), ~2% on the
-//    deprecated service endpoint, ~5% plain. Balance-verified retries need
-//    fee slack on skimmed sides.
+//    between ledger rows (NOT in a row's before/after) — ~1% under the
+//    service endpoint (probed: a 20-buck receipt lost 0.2). No leg-level
+//    reconciliation: a skimmed payout simply shows up later as a small
+//    truth-resync delta on the player's projected balance.
 //  - Errors: bad creds → 401 UNAUTHORISED, not enough money → 400
 //    BAD_REQUEST "… does not have enough to send …", duplicate user → 409
 //    CONFLICTING_RESOURCE, missing user → 404 NOT_FOUND, and a bad
@@ -185,7 +190,15 @@ async function alcesRequest(path: string, init?: RequestInit): Promise<Rest> {
     throw new AlcesBankError(`That bank username is already taken`, 'already_taken');
   }
   if (errCode === 'NOT_FOUND') {
-    throw new AlcesBankError(`That bank account does not exist`, 'not_found');
+    // Carry the bank's own wording — the drain relies on it to tell a bad
+    // service token ("No service with that token exists", every transfer
+    // doomed) apart from one missing player account (fixable by linking).
+    throw new AlcesBankError(
+      typeof body?.message === 'string' && body.message
+        ? body.message
+        : 'That bank account does not exist',
+      'not_found',
+    );
   }
   if (errCode === 'BAD_REQUEST' && /does not have enough/.test((body?.message as string) ?? '')) {
     throw new AlcesBankError((body?.message as string) ?? 'Not enough moose bucks', 'insufficient_funds');
@@ -258,34 +271,35 @@ export interface ServiceTransferOpts {
   password: string;
   /** Positive transfer amount; the bank rejects < 1. */
   amount: number;
-  /** Direction: 'loss' = the player pays the pot (stake/debit),
-   *  'win' = the pot pays the player (payout/credit). */
-  type: 'win' | 'loss';
+  /** Leg direction — 'hold' commits staked funds as a refundable stake,
+   *  'return' releases/hands funds back to the player, 'win' pays the
+   *  player from the pot, 'loss' charges the player outright. Holds that
+   *  resolve are released ('return') then booked as 'win'/'loss' legs. */
+  type: 'win' | 'loss' | 'hold' | 'return';
 }
 
-/** One bookie transfer through our service pot: POST /services/transaction.
- *  204 on success; the money moves player↔pot under our service's ledger,
- *  and the pot's balance is readable via GET /services/{name}.
- *
- *  There is deliberately NO fallback to the plain endpoint on service errors:
- *  a service failure may mean "nothing moved" or "moved but the response was
- *  lost" — automatically re-sending on the plain path would double-send in
- *  the second case. Service-path failures instead fail the sync job, and the
- *  drain's balance-verified retry (drainBankSync) re-sends only after
- *  proving on the bank's balances that the first attempt never landed. If
- *  this fires repeatedly, check ALCES_SERVICE_TOKEN (an invalid token is a
- *  404 NOT_FOUND "No service with that token exists" on every transfer). */
-export async function alcesServiceTransfer({ username, password, amount, type }: ServiceTransferOpts): Promise<void> {
+/** One bookie leg through our service pot: POST /services/transaction.
+ *  200 { id } on success — the money moves player↔pot under our service's
+ *  ledger and the pot's balance is readable via GET /services/{name}.
+ *  Fire-and-forget: the created bank transaction id comes back (or null)
+ *  purely for logging; nothing here tries to prove the leg landed — the
+ *  bank-truth resync (lib/bank.ts reconcileAlcesBalances) keeps the
+ *  projected balances honest instead. If this fires repeatedly, check
+ *  ALCES_SERVICE_TOKEN (an invalid token is a 404 NOT_FOUND "No service
+ *  with that token exists" on every transfer). */
+export async function alcesServiceTransfer({ username, password, amount, type }: ServiceTransferOpts): Promise<number | null> {
   const { serviceToken } = alcesConfig();
   if (!serviceToken) {
     // Mirror shouldn't be enabled without a token, but stay honest if it flips off.
     throw new AlcesBankError('Bookie service token is not configured', 'no_service_token');
   }
   try {
-    await alcesRequest('/services/transaction', {
+    const { body } = await alcesRequest('/services/transaction', {
       method: 'POST',
       body: JSON.stringify({ username, password, serviceToken, amount, type }),
     });
+    const id = body ? (body as { id?: unknown }).id : undefined;
+    return typeof id === 'number' && Number.isInteger(id) ? id : null;
   } catch (e) {
     // Distinguish the two 404s this endpoint answers (probed): the TOKEN's
     // 404 reads "No service with that token exists", while a missing PLAYER
@@ -303,16 +317,6 @@ export async function alcesServiceTransfer({ username, password, amount, type }:
     }
     throw e;
   }
-}
-
-/** Plain sender→recipient transfer: POST /users/transaction/{recipient}.
- *  Replaces the removed POST /transactions/{username}; used only as the
- *  tokenless fallback in the drain (the bank skims ~5% on this path). */
-export async function alcesPlainTransfer(toUser: string, fromUser: string, fromPassword: string, amount: number): Promise<void> {
-  await alcesRequest(`/users/transaction/${toUser}`, {
-    method: 'POST',
-    body: JSON.stringify({ username: fromUser, password: fromPassword, amount }),
-  });
 }
 
 /** Our service pot's balance at the bank (GET /services/{name}) — the truth

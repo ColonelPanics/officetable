@@ -8,7 +8,7 @@
 
 import db from './db';
 import { processMatch, correctMatch } from './elo';
-import { getBank, assertBankLinked, kickBankSync, alcesMirrorEnabled } from './bank';
+import { getBank, assertBankLinked, kickBankSync, alcesMirrorEnabled, enqueueHoldResolution } from './bank';
 import { computeOddsLadder } from './gambleOdds';
 import { announceBetsClosed, announceCancelled } from './gambleNotifications';
 import { normaliseStartDate, toDbDate } from './seasons';
@@ -1043,6 +1043,15 @@ export function settleGambleMatch(
         returns += payout;
       }
       db.prepare(`UPDATE bets SET status = ?, payout = ? WHERE id = ?`).run(won ? 'won' : 'lost', payout, bet.id);
+      // The bank manager's dance for the held stake: release it ('return'),
+      // then book the real outcome — the profit for a winner, the stake for
+      // a loser. (The gambler_payout row above is deliberately NOT mirrored
+      // — the bank sees this money through these legs.)
+      enqueueHoldResolution(
+        { refType: 'bet_stake', refId: gambleMatchId, playerId: bet.bettor_id, held: bet.stake },
+        won ? { type: 'win', amount: Math.max(0, payout - bet.stake) }
+            : { type: 'loss', amount: bet.stake },
+      );
       betPayments.push({
         bettor_id: bet.bettor_id,
         bettor_name: bet.bettor_name ?? `player ${bet.bettor_id}`,
@@ -1116,6 +1125,17 @@ export function settleGambleMatch(
           playerEntry.push({ playerId: m.playerId, fee: gm.entry_fee, returned: per });
         }
       }
+    }
+
+    // Entry fees resolve the same way as bet stakes: release the held fee
+    // ('return'), then book what actually became of it — a win when the
+    // settle's share beat the fee, a loss of the shortfall when it didn't.
+    for (const entry of playerEntry) {
+      const delta = entry.returned - entry.fee;
+      enqueueHoldResolution(
+        { refType: 'challenge_fee', refId: gm.challenge_id ?? 0, playerId: entry.playerId, held: entry.fee },
+        delta === 0 ? null : { type: delta > 0 ? 'win' : 'loss', amount: Math.abs(delta) },
+      );
     }
 
     // 4. The pot = everything banked (stakes + both entry fees) minus what

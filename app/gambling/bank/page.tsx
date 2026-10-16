@@ -186,7 +186,7 @@ export default function BankPage() {
                 <span>
                   ⏳ {data.sync_backlog.pending} movement{data.sync_backlog.pending === 1 ? '' : 's'} still syncing to the central bank
                   {data.sync_backlog.failed > 0 && <> · {data.sync_backlog.failed} failed (one controlled retry per press)</>}
-                  {data.sync_backlog.unverified > 0 && <> · {data.sync_backlog.unverified} need manual verification (the drainer couldn&apos;t prove on the bank whether the transfer landed)</>}
+                  {data.sync_backlog.unverified > 0 && <> · {data.sync_backlog.unverified} legacy transfer{data.sync_backlog.unverified === 1 ? "" : "s"} queued to hit the bank again</>}
                 </span>
                 {(data.sync_backlog.failed > 0 || data.sync_backlog.unverified > 0) && (
                   <button

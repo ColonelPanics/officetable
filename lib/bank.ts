@@ -6,11 +6,22 @@
 //
 // The central bank is the Alces Bookie API (lib/alcesBank.ts) — "bank is the
 // truth". The SQLite ledger remains the gambling engine's bookkeeping, and
-// every PLAYER movement is mirrored out as a real player↔bookie-pot transfer
-// (POST /services/transaction — lib/alcesBank.ts) via the bank_sync outbox
-// (drained asynchronously; retries until done). A
-// central-office bank API only needs to implement BankProvider — call sites
-// in lib/gamble.ts and the routes don't change.
+// every PLAYER movement is mirrored out as a leg on our service pot
+// (POST /services/transaction — lib/alcesBank.ts) via the bank_sync outbox.
+// Legs are typed by intent, matching what the gambles do:
+//   staked funds       → 'hold'    (the commitment when it is placed)
+//   resolved holds     → 'return' + the real outcome leg ('loss' of the
+//                        stake, 'win' of the profit — the bank manager's
+//                        dance: release the hold, then book the outcome)
+//   refunds            → 'return'  (a commitment handed back unspent)
+//   other pot payments → 'win'     (achievement payouts, pot shares)
+// Delivery is fire-and-forget: a leg either returns (great) or doesn't
+// (fine — no per-attempt verification, like every other service on the
+// bank). Displayed balances stay honest through the bank-truth resync
+// (reconcileAlcesBalances), which turns any leg the bank never accepted
+// into a ledgered balance delta instead of a stuck queue. A central-office
+// bank API only needs to implement BankProvider — call sites in
+// lib/gamble.ts and the routes don't change.
 
 import db from './db';
 import { decryptSecret, encryptSecret } from './crypto';
@@ -19,7 +30,6 @@ import {
   alcesBalance,
   alcesConfig,
   alcesMirrorEnabled,
-  alcesPlainTransfer,
   alcesServiceBalance,
   alcesServiceTransfer,
   listAlcesBalances,
@@ -73,15 +83,23 @@ export interface BankTransactionRow {
 const selectBalance = db.prepare(`SELECT balance FROM bank_accounts WHERE player_id = ?`);
 const selectHouseBalance = db.prepare(`SELECT balance FROM bank_house WHERE id = 1`);
 
+/** Ledger ref types whose money reaches the bank THROUGH resolution legs
+ *  rather than a row-derived mirror: settlement books 'gambler_payout' and
+ *  'player_share' rows locally, but the bank sees those payouts via the
+ *  release-and-settle dance of the held stake/fee (enqueueHoldResolution:
+ *  release 'return', then the real 'win'/'loss'). Mirroring the rows too
+ *  would pay every win twice. */
+const SETTLE_RESOLVED_REFS = new Set(['gambler_payout', 'player_share']);
+
 function writeLedger(playerId: number | null, amount: number, ref: BankRef): void {
   const result = db.prepare(`
     INSERT INTO bank_transactions (ref_type, ref_id, player_id, amount, memo)
     VALUES (?, ?, ?, ?, ?)
   `).run(ref.type, ref.id ?? null, playerId, amount, ref.memo ?? null);
-  // Player movements mirror to the central bank as real transfers (outbox).
+  // Player movements mirror to the central bank as legs (outbox).
   // House-only rows (house_fee, pot_house_cut, house_loss) stay local — the
-  // house bank user implicitly collects fees + stakes as its remote balance.
-  if (playerId !== null && alcesMirrorEnabled()) {
+  // bank's pot implicitly keeps the fees and cuts as a residual.
+  if (playerId !== null && alcesMirrorEnabled() && !SETTLE_RESOLVED_REFS.has(ref.type)) {
     db.prepare(`
       INSERT INTO bank_sync (transaction_id, status) VALUES (?, 'pending')
     `).run(result.lastInsertRowid);
@@ -338,9 +356,79 @@ export function bankSyncBacklog(): { pending: number; failed: number; unverified
 interface SyncJob {
   id: number;
   transaction_id: number;
-  attempts: number;
-  status: string;
-  pre_balance: number | null;
+  legs: string | null;
+}
+
+/** One central-bank leg (a POSTed service transaction). */
+export interface BankLeg {
+  type: 'win' | 'loss' | 'hold' | 'return';
+  amount: number;
+}
+
+const LEG_TYPES = new Set<string>(['win', 'loss', 'hold', 'return']);
+
+/** Parse a job's stored leg plan; throws (a normal job failure) on malformed
+ *  plans so the row burns out through the usual attempts instead of looping. */
+function parseBankLegs(json: string): BankLeg[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    throw new BankError('bank_sync job carries a malformed leg plan', 'bad_leg_plan');
+  }
+  const error = new BankError('bank_sync job carries a malformed leg plan', 'bad_leg_plan');
+  if (!Array.isArray(parsed) || !parsed.length) throw error;
+  const legs: BankLeg[] = [];
+  for (const item of parsed) {
+    const { type, amount } = (item ?? {}) as Record<string, unknown>;
+    if (typeof type !== 'string' || !LEG_TYPES.has(type)
+      || typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0) throw error;
+    legs.push({ type: type as BankLeg['type'], amount });
+  }
+  return legs;
+}
+
+export interface HoldResolutionOutcome {
+  type: 'win' | 'loss';
+  amount: number;
+}
+
+/** Queue the release-and-settle legs for a held commitment (a bet stake or
+ *  an entry fee) that just RESOLVED — the bank manager's model: the hold
+ *  sits on the player until the outcome is known, then it is released
+ *  ('return') and the outcome books as a real 'loss' (the player pays) or
+ *  'win' (the player is paid their profit on top of the release). Two jobs,
+ *  one leg each, so a failure anywhere retries exactly that leg. Amounts
+ *  ride on the jobs; the anchor ledger row (the commitment's own row) only
+ *  ties the job to the ledger and the player's bank account. Callers are
+ *  expected to be inside a db transaction so the legs land atomically with
+ *  the ledger rows that describe them.
+ *  Net effect under either reading of 'hold' (reservation or pot-bound
+ *  transfer) is money-neutral to money-correct — see drainBankSync. */
+export function enqueueHoldResolution(
+  hold: { refType: string; refId: number; playerId: number; held: number },
+  outcome: HoldResolutionOutcome | null,
+): void {
+  if (!alcesMirrorEnabled()) return; // offline/mock mode: nothing to resolve remotely
+  const anchor = db.prepare(`
+    SELECT id, player_id FROM bank_transactions
+    WHERE ref_type = ? AND ref_id = ? AND player_id = ?
+    ORDER BY id LIMIT 1
+  `).get(hold.refType, hold.refId, hold.playerId) as { id: number; player_id: number } | undefined;
+  if (!anchor) {
+    // Anchor rows and their commitments are written in the same transaction,
+    // so a missing anchor means local bookkeeping never happened either —
+    // log it loudly and skip rather than break the caller's settle.
+    console.error(`[bank] no ${hold.refType} row for ref ${hold.refId} player ${hold.playerId} — resolution legs skipped`);
+    return;
+  }
+  const enqueue = db.prepare(`
+    INSERT INTO bank_sync (transaction_id, status, legs) VALUES (?, 'pending', ?)
+  `);
+  enqueue.run(anchor.id, JSON.stringify([{ type: 'return', amount: hold.held }]));
+  if (outcome && outcome.amount > 0) {
+    enqueue.run(anchor.id, JSON.stringify([{ type: outcome.type, amount: outcome.amount }]));
+  }
 }
 
 let draining = false;
@@ -353,49 +441,59 @@ const MAX_SYNC_ATTEMPTS = 10;
  *  strings and the bank itself is imprecise about rounding). */
 const BALANCE_EPS = 0.005;
 
-/** The bank skims a fee off RECEIPTS, visibly only between ledger rows —
- *  so payout legs that verify against the pot's (or fallback house's)
- *  balance tolerate a skim fraction (~1% under the service-pot endpoint)
- *  plus round-off in their landed check. */
-const FEE_SLACK_PCT = 0.011;
-
-/** Push queued movements to the central bank. Fire-and-forget; never throws.
- *
- *  Delivery safety (the bank has no idempotency keys, so a retry after a
- *  lost response used to mean a double-send): before every attempt the
- *  PAYING balance is snapshotted into bank_sync.pre_balance — the player's
- *  balance for staking legs ('loss'), our service's bookie pot for payout
- *  legs ('win').
- *  Any job whose previous attempt did not end with a clean acknowledgement is
- *  VERIFIED first against a fresh balance read:
- *    fresh == pre_balance           → never landed → safe to (re)send
- *    fresh == pre_balance - amount  → already landed → mark done, no resend
- *    anything else                  → parked 'unverified' for a human
- *  Rows KEEP their snapshot after completing, so even a manual re-arm of a
- *  'done' row verifies instead of blind-resending.
+/** Map a ledger movement to its central-bank leg type:
+ *   - every player DEBIT is committed stake money → 'hold' (bet stakes,
+ *     gamble/entry fees) — refundable, so a refund leg can hand it back;
+ *   - 'refund' credits hand committed funds back → 'return' (stake and
+ *     entry-fee refunds on cancelled/voided gambles, pre-close refunds);
+ *   - every other player credit is a payment from the pot → 'win'
+ *     (gambler payouts, entry shares, pot winner/score shares, achievement
+ *     payouts). House-only rows (player_id NULL) are never queued.
+ *   - 'loss' (an instant, non-refundable player→pot charge — the verb the
+ *     instant services ping) is unused here by design: a losing bet simply
+ *     KEEPS its hold. The pot received the stake when it was held and the
+ *     player already saw it leave their balance, so no leg describes a loss
+ *     without double-charging. The win/lose status of a gamble is expressed
+ *     by which legs it produced (wins for winners, bare holds for losers,
+ *     returns for refunds) and every pot/player balance stays exactly in
+ *     step with the local ledger.
  */
+function bankLegType(refType: string, amount: number): 'win' | 'loss' | 'hold' | 'return' {
+  if (amount < 0) return 'hold';
+  return refType === 'refund' ? 'return' : 'win';
+}
+
+/** Push queued movements to the central bank as legs. Fire-and-forget: each
+ *  row is POSTed to the bank once per drain; a 2xx marks it done, a failure
+ *  marks it failed (retried on later kicks until it burns out after
+ *  MAX_SYNC_ATTEMPTS). There is deliberately NO delivery verification
+ *  between attempts — like every other service on the bank, we just ping
+ *  the legs and trust the API; whatever never lands shows up afterwards as
+ *  a balance delta in reconcileAlcesBalances ('resync' rows), not as a
+ *  stuck queue. A crash leftover 'sending' row (or a legacy 'unverified'
+ *  one) is simply sent again. If a leg keeps failing, check
+ *  ALCES_SERVICE_TOKEN (an invalid token is a 404 NOT_FOUND "No service
+ *  with that token exists" on every transfer). */
 export async function drainBankSync(): Promise<void> {
   if (!alcesMirrorEnabled() || draining) return;
   draining = true;
+  let progress = false;
   try {
-    // Since the 2026-10 service-pot format, bookie legs NEVER touch the house
-    // user — the counterparty is our service pot, resolved from the token. No
-    // ensureAlcesHouse() here; house credentials only matter for the tokenless
-    // plain-transfer fallback below. (ensureAlcesHouse stays in the link path,
-    // where account registration actually needs it.)
-    const { houseUser, housePassword, serviceToken, serviceName } = alcesConfig();
-    // 'sending' = a crash leftover mid-flight attempt (needs verification).
-    // 'unverified' never auto-retries — only an explicit resync re-arms it,
-    // and even then it goes through the balance verification first.
+    // Bookie legs NEVER touch the house user — the counterparty is our
+    // service pot, resolved from the token. (ensureAlcesHouse stays in the
+    // link path, where account registration actually needs it.)
     const jobs = db.prepare(`
-      SELECT id, transaction_id, attempts, status, pre_balance FROM bank_sync
-      WHERE (status IN ('pending', 'failed') AND attempts < ${MAX_SYNC_ATTEMPTS})
-         OR status = 'sending'
+      SELECT id, transaction_id, legs FROM bank_sync
+      WHERE status IN ('pending', 'failed', 'sending', 'unverified')
+        AND attempts < ${MAX_SYNC_ATTEMPTS}
       ORDER BY id LIMIT 25
     `).all() as SyncJob[];
     if (!jobs.length) return;
     const ledger = db.prepare(`
-      SELECT player_id, amount FROM bank_transactions WHERE id = ?
+      SELECT ref_type, player_id, amount FROM bank_transactions WHERE id = ?
+    `);
+    const account = db.prepare(`
+      SELECT bank_username, bank_password FROM bank_accounts WHERE player_id = ?
     `);
     const markDone = db.prepare(`
       UPDATE bank_sync SET status = 'done', error = NULL WHERE id = ?
@@ -403,153 +501,62 @@ export async function drainBankSync(): Promise<void> {
     const markFailed = db.prepare(`
       UPDATE bank_sync SET status = 'failed', attempts = attempts + 1, error = ? WHERE id = ?
     `);
-    const markUnverified = db.prepare(`
-      UPDATE bank_sync SET status = 'unverified', error = ? WHERE id = ?
-    `);
-    // Each job is tried AT MOST ONCE per drain. If this batch made no
-    // progress (all failures — e.g. bank errors the breaker doesn't catch),
-    // stop: retrying in a tight loop would hammer the bank's API.
-    let progress = false;
+    // Each job is tried AT MOST ONCE per drain; the first failure stops the
+    // batch so a bad set of legs can't burn more attempts or hammer the
+    // bank's API — the rest waits for the next kick.
     for (const job of jobs) {
-      const tx = ledger.get(job.transaction_id) as { player_id: number; amount: number } | undefined;
-      const account = tx
-        ? db.prepare(`SELECT bank_username, bank_password FROM bank_accounts WHERE player_id = ?`)
-            .get(tx.player_id) as { bank_username: string | null; bank_password: string | null } | undefined
+      const tx = ledger.get(job.transaction_id) as
+        { ref_type: string; player_id: number; amount: number } | undefined;
+      const acct = tx
+        ? (account.get(tx.player_id) as
+            { bank_username: string | null; bank_password: string | null } | undefined)
         : undefined;
       try {
-        if (!tx || !account?.bank_username || !account.bank_password) {
+        if (!tx || !acct?.bank_username || !acct.bank_password) {
           throw new BankError('Player bank account unregistered', 'bank_not_linked');
         }
         // Credentials are encrypted at rest (lib/crypto.ts).
-        const fromPassword = decryptSecret(account.bank_password);
-        if (!fromPassword) {
+        const password = decryptSecret(acct.bank_password);
+        if (!password) {
           throw new BankError('Player bank credentials cannot be decrypted', 'bank_not_linked');
         }
-        const transferAmount = Math.abs(tx.amount);
-        const debit = tx.amount < 0;
-        const playerUser = account.bank_username;
-
-        // The paying balance is the verification side:
-        //   debit  ('loss': the player pays our pot)  → the PLAYER's balance
-        //   credit ('win':  our pot pays the player)  → the SERVICE POT's
-        //     balance, falling back to the HOUSE's on the tokenless plain path.
-        // The tokenless fallback can only happen if the mirror's token flips
-        // off between the enable-check and the send.
-        const fallback = !serviceToken;
-        const readFresh = async (): Promise<Map<string, number> | number | null> =>
-          debit || fallback
-            ? listAlcesBalances().catch(() => null)
-            : alcesServiceBalance(); // null = pot unreadable → treat as unreachable
-        const holderOf = (fresh: Map<string, number> | number): number | undefined =>
-          typeof fresh === 'number' ? fresh : fresh.get(debit || fallback ? (debit ? playerUser : houseUser) : '');
-        const holderLabel = debit || fallback ? (debit ? playerUser : houseUser) : `the ${serviceName} pot`;
-
-        // ---- delivery verification for anything already attempted ----
-        // The snapshot (pre_balance) is recorded just before every send, so
-        // its presence means a previous attempt was at least staged — verify
-        // before re-sending. Never gate this on attempts: resync re-arms
-        // reset attempts to 0, and only the snapshot is unfakeable evidence
-        // "this row was on its way to the bank".
-        if (job.status === 'sending' || job.pre_balance !== null) {
-          if (job.pre_balance === null) {
-            // Old-style row (pre-snapshot migration) interrupted mid-flight —
-            // we can know nothing; park it for a human rather than resend.
-            markUnverified.run('Prior attempt mid-flight with no balance snapshot recorded — verify by hand on the bank, then re-arm via resync.', job.id);
-            continue;
-          }
-          const fresh = await readFresh();
-          if (fresh === null) {
-            // Bank (or the service pot) unreadable — abort this drain; nothing
-            // was sent, and the next drain will re-verify from the snapshot.
-            return;
-          }
-          const now = holderOf(fresh);
-          if (now === undefined) {
-            markUnverified.run(`Expected payer ${holderLabel} not found on the bank — manual verification required.`, job.id);
-            continue;
-          }
-          // The bank skims a fee off RECEIPTS between rows (lib/alcesBank.ts),
-          // so a payout leg's payer (pot/house) may land a skim fraction short
-          // of exactly the amount — the landed check carries fee slack. Stakes
-          // verify on the exact-paying player balance (no slack).
-          const feeSlack = debit ? 0 : FEE_SLACK_PCT * transferAmount;
-          if (Math.abs(now - (job.pre_balance - transferAmount)) < BALANCE_EPS + feeSlack) {
-            // The prior attempt DID land despite being recorded as a failure.
-            markDone.run(job.id);
-            progress = true;
-            continue;
-          }
-          if (Math.abs(now - job.pre_balance) >= BALANCE_EPS) {
-            // Payer's balance moved by neither 0 nor exactly the amount —
-            // something outside our ledger touched this account (another
-            // service, a player's own bank transfer). Never auto-resend.
-            markUnverified.run(
-              `Cannot verify delivery: payer ${holderLabel} was ${job.pre_balance} on the bank,` +
-              ` expected ${job.pre_balance - transferAmount} if the prior attempt landed,` +
-              ` but the bank shows ${now}. Verify by hand, then re-arm via resync.`, job.id);
-            continue;
-          }
-          // fresh == pre_balance: the prior attempt never landed — fall
-          // through and send now.
-        }
-
-        // Fresh pre-send snapshot (used by any future verification). No read →
-        // abort WITHOUT staging (a null snapshot would park the job as
-        // unverifiable at every later retry; better to wait and read again —
-        // the missing-player `?? null` case below keeps the old semantics).
-        const preFresh = await readFresh();
-        if (preFresh === null) return;
-        const pre = holderOf(preFresh) ?? null;
-        db.prepare(`
-          UPDATE bank_sync SET status = 'sending', pre_balance = ? WHERE id = ?
-        `).run(pre, job.id);
-
-        if (debit) {
-          // Debit: the player stakes/pays the exact ledgered amount into our
-          // service pot, authenticated as the player (the token resolves the
-          // pot — there is no recipient under the new format).
-          if (serviceToken) {
-            await alcesServiceTransfer({
-              username: playerUser, password: fromPassword,
-              amount: transferAmount, type: 'loss',
-            });
-          } else {
-            // Tokenless fallback: plain player→house (≈5% receipt skim on the
-            // house, but the mirror's delivery guarantees are identical).
-            await alcesPlainTransfer(houseUser, playerUser, fromPassword, transferAmount);
-          }
-        } else {
-          // Credit: our pot pays the player, authenticated as the player.
-          if (serviceToken) {
-            await alcesServiceTransfer({
-              username: playerUser, password: fromPassword,
-              amount: transferAmount, type: 'win',
-            });
-          } else {
-            if (!housePassword) throw new BankError('No house password for the tokenless plain-transfer fallback', 'bank_disabled');
-            // Tokenless fallback: the house pays the player on the plain path.
-            await alcesPlainTransfer(playerUser, houseUser, housePassword, transferAmount);
+        // The job's leg plan: stored JSON when the legs were planned at
+        // enqueue time (hold-resolution dances), else one leg derived from
+        // the ledger row itself (stake → hold, refund → return, credit → win).
+        const legs = job.legs
+          ? parseBankLegs(job.legs)
+          : [{ type: bankLegType(tx.ref_type, tx.amount), amount: Math.abs(tx.amount) }];
+        for (const leg of legs) {
+          if (leg.amount <= 0) continue; // a zero leg moves nothing — skip it
+          const bankTxId = await alcesServiceTransfer({
+            username: acct.bank_username, password,
+            amount: leg.amount, type: leg.type,
+          });
+          if (bankTxId !== null) {
+            console.log(`[bank] ledger #${job.transaction_id} mirrored as bank transaction ${bankTxId} (${leg.type} ${leg.amount})`);
           }
         }
-        // NOTE: pre_balance is deliberately NOT cleared here — a done row
-        // that ever gets re-armed verifies against it instead of re-sending.
+        // Only marked done AFTER every leg of the plan went out; a failure
+        // mid-plan retries the whole plan (each dance job is single-legged,
+        // so plan-retries are ordinarily one leg wide anyway).
         markDone.run(job.id);
         progress = true;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         markFailed.run(msg, job.id);
-        // HARD STOP on the first failure of any kind (not just connection
-        // trouble): a bad batch must not burn more attempts or hammer the
-        // bank — every kicking route would otherwise chain failing HTTP
-        // calls. The rest of the batch waits for the next kick. (The job's
-        // pre_balance snapshot survives, so the eventual retry verifies.)
         return;
       }
     }
-    if (!progress) return;
-    await reconcileAlcesBalances();
   } finally {
     draining = false;
+    // After a drain that moved rows, snap the projections onto the bank's
+    // truth — this is the fire-and-forget safety net: whatever the bank
+    // never accepted becomes a ledgered resync delta on the display, not a
+    // stuck balance. (Formerly this reconcile ran INSIDE the drain, silenced
+    // by this very `draining` re-entry guard — a dead call; it lives here.)
+    if (progress) {
+      void reconcileAlcesBalances().catch(e => console.error('post-drain resync:', e));
+    }
   }
 }
 
@@ -636,7 +643,12 @@ export function netHistory(playerId: number | null): { gamble: number | null; da
 export async function reconcileAlcesBalances(): Promise<void> {
   if (!alcesMirrorEnabled() || draining) return;
   const backlog = bankSyncBacklog();
-  if (backlog.pending > 0 || backlog.failed > 0) return;
+  // Only block while rows are about to move (pending/sending) or parked for
+  // re-arm (legacy 'unverified') — snapping while a leg is in flight would
+  // tell half a story. Burnt 'failed' rows do NOT block: the bank's truth is
+  // allowed to speak about legs it never accepted, and the resync delta on
+  // the display documents it.
+  if (backlog.pending > 0 || backlog.sending > 0 || backlog.unverified > 0) return;
   let balances: Map<string, number>;
   try {
     balances = await listAlcesBalances();

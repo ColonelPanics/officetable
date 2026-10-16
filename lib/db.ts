@@ -685,23 +685,28 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS bank_sync (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     transaction_id INTEGER NOT NULL REFERENCES bank_transactions(id),
-    status TEXT NOT NULL DEFAULT 'pending',    -- pending | sending | done | failed | unverified
+    status TEXT NOT NULL DEFAULT 'pending',    -- pending | sending | done | failed
     attempts INTEGER NOT NULL DEFAULT 0,
     error TEXT,
+    legs TEXT,                                 -- explicit leg plan JSON (see lib/bank.ts), NULL = derive from the ledger row
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
   CREATE INDEX IF NOT EXISTS idx_bank_sync_status ON bank_sync(status, id);
 `);
 
-// Migration: delivery-verification for retried bank transfers. The bank has
-// no idempotency keys, so a retry after a lost response would double-send.
-// The drainer records the sender's real bank-side balance immediately before
-// each attempt; any later uncertain retry compares the fresh balance against
-// that snapshot (pre_balance) before deciding to re-send. Rows keep their
-// snapshot after completing so even a manual re-arm of a 'done' row verifies
-// instead of blind-resending.
+// Legacy column: bank-transfer delivery verification (pre_balance
+// snapshots recorded just before each send, for the old verify-then-resend
+// drain). The mirror now fires legs fire-and-forget (lib/bank.ts), so the
+// column only keeps its schema slot — history rows keep whatever they
+// recorded, new rows leave it NULL.
 try {
   db.exec(`ALTER TABLE bank_sync ADD COLUMN pre_balance REAL`);
+} catch (e) { /* column already exists */ }
+// Explicit multi-leg plans for mirror jobs (the release-and-settle dance
+// for held stakes/fees — see enqueueHoldResolution in lib/bank.ts). NULL
+// means the drainer derives the single leg from the ledger row itself.
+try {
+  db.exec(`ALTER TABLE bank_sync ADD COLUMN legs TEXT`);
 } catch (e) { /* column already exists */ }
 
 // One-time secret migration: anything stored as plaintext (pre-encryption
