@@ -219,6 +219,15 @@ export function checkAchievements(context: AchievementContext): AchievementResul
     eloBeforeMap.set(p.player_id, p.elo_before);
   }
 
+  // Game meta — score_type gates achievements that only make sense in one
+  // scoring system (e.g. fixed-total "best of" games can produce one-point
+  // and drawn scorelines that a "first to X" game cannot legitimately).
+
+  const game = db.prepare('SELECT score_type, score_value FROM games WHERE id = ?').get(gameId) as
+    | { score_type: string | null; score_value: number }
+    | undefined;
+  const isBestOf = game?.score_type === 'best_of';
+
   // Get all players for name lookups (tiebreaker + achievement metadata)
   const allPlayerNamesBefore = new Map<number, string>();
   const allNamesStmt = db.prepare('SELECT id, name FROM players');
@@ -254,6 +263,25 @@ export function checkAchievements(context: AchievementContext): AchievementResul
           playerId: winnerId,
           matchId
         });
+      }
+    }
+  }
+
+  // The Frustrator: Score exactly one point in defeat — that single point
+  // stops the opponent's otherwise flawless win. Best-of (fixed-total) games
+  // only: conceding exactly 1 is a near shut-out there, while a one-point
+  // loss happens all the time in a first-to game.
+  if (!isDraw && isBestOf) {
+    for (const team of teams) {
+      if (team.score === 1 && team.score < maxScore) {
+        for (const loserId of team.player_ids) {
+          results.push({
+            achievementName: 'the_frustrator',
+            playerId: loserId,
+            matchId,
+            metadata: { opponent_score: maxScore }
+          });
+        }
       }
     }
   }
@@ -375,6 +403,10 @@ export function checkAchievements(context: AchievementContext): AchievementResul
   const numberOneBefore = sortedBefore[0]?.[0];
   const lastBefore = sortedBefore[sortedBefore.length - 1]?.[0];
 
+  // 1-indexed board positions as of just before this match (board members only)
+  const rankBefore = new Map<number, number>();
+  sortedBefore.forEach(([id], idx) => rankBefore.set(id, idx + 1));
+
   if (!isDraw && boardSettled) {
     for (const winnerId of winnerIds) {
       for (const loserId of loserIds) {
@@ -390,8 +422,10 @@ export function checkAchievements(context: AchievementContext): AchievementResul
     }
   }
 
-  // The Best / The Worst: Only if rank changes into #1 or last position
-  if (!isDraw && boardSettled) {
+  // The Best / The Worst / Switcharoo / Giant Slayer — all board-position
+  // achievements, so they need the after-match board (the same timeline with
+  // this match applied) and the season board to have settled.
+  if (boardSettled) {
     // Calculate the after-match board (same timeline with this match applied)
     const allEloAfter = new Map<number, number>();
     for (const row of ladderTimeline) {
@@ -405,25 +439,108 @@ export function checkAchievements(context: AchievementContext): AchievementResul
     const numberOneAfter = sortedAfter[0]?.[0];
     const lastAfter = sortedAfter[sortedAfter.length - 1]?.[0];
 
-    // The Best: Only if player is now #1 AND wasn't #1 before
-    for (const winnerId of winnerIds) {
-      if (winnerId === numberOneAfter && winnerId !== numberOneBefore) {
-        results.push({
-          achievementName: 'the_best',
-          playerId: winnerId,
-          matchId
-        });
+    // 1-indexed board positions as of just after this match
+    const rankAfter = new Map<number, number>();
+    sortedAfter.forEach(([id], idx) => rankAfter.set(id, idx + 1));
+
+    if (!isDraw) {
+      // The Best: Only if player is now #1 AND wasn't #1 before
+      for (const winnerId of winnerIds) {
+        if (winnerId === numberOneAfter && winnerId !== numberOneBefore) {
+          results.push({
+            achievementName: 'the_best',
+            playerId: winnerId,
+            matchId
+          });
+        }
+      }
+
+      // The Worst: Only if player is now last AND wasn't last before
+      for (const loserId of loserIds) {
+        if (loserId === lastAfter && loserId !== lastBefore) {
+          results.push({
+            achievementName: 'the_worst',
+            playerId: loserId,
+            matchId
+          });
+        }
+      }
+
+      // Giant Slayer: Beat someone ranked in the top 3 at game time while
+      // you are NOT yourself ranked in the top 3 (the plain top-3 beating
+      // case overlaps boss_fight at #1, which keeps that achievement's own
+      // identity).
+      for (const winnerId of winnerIds) {
+        for (const loserId of loserIds) {
+          const loserRank = rankBefore.get(loserId);
+          const winnerRank = rankBefore.get(winnerId);
+          if (
+            loserRank !== undefined &&
+            winnerRank !== undefined &&
+            loserRank <= 3 &&
+            winnerRank > 3
+          ) {
+            results.push({
+              achievementName: 'giant_slayer',
+              playerId: winnerId,
+              matchId,
+              metadata: {
+                victim: playerNameMap.get(loserId),
+                victim_rank: loserRank,
+                winner_rank: winnerRank
+              }
+            });
+          }
+        }
       }
     }
 
-    // The Worst: Only if player is now last AND wasn't last before
-    for (const loserId of loserIds) {
-      if (loserId === lastAfter && loserId !== lastBefore) {
-        results.push({
-          achievementName: 'the_worst',
-          playerId: loserId,
-          matchId
-        });
+    // Switcharoo: Two opponents leave the match having swapped ladder
+    // positions — whoever sat above now sits below the other. Draws count:
+    // a shared point haul can still reorder the board. Both swappers earn
+    // it (they did it to each other).
+    for (let i = 0; i < participants.length; i++) {
+      for (let j = i + 1; j < participants.length; j++) {
+        const a = participants[i];
+        const b = participants[j];
+        if (a.team === b.team) continue;
+
+        const aBefore = rankBefore.get(a.player_id);
+        const bBefore = rankBefore.get(b.player_id);
+        const aAfter = rankAfter.get(a.player_id);
+        const bAfter = rankAfter.get(b.player_id);
+
+        if (
+          aBefore === undefined || bBefore === undefined ||
+          aAfter === undefined || bAfter === undefined
+        ) continue;
+
+        const swapped =
+          (aBefore < bBefore && aAfter > bAfter) ||
+          (bBefore < aBefore && bAfter > aAfter);
+
+        if (swapped) {
+          results.push({
+            achievementName: 'switcharoo',
+            playerId: a.player_id,
+            matchId,
+            metadata: {
+              with_opponent: playerNameMap.get(b.player_id),
+              rank_before: aBefore,
+              rank_after: aAfter
+            }
+          });
+          results.push({
+            achievementName: 'switcharoo',
+            playerId: b.player_id,
+            matchId,
+            metadata: {
+              with_opponent: playerNameMap.get(a.player_id),
+              rank_before: bBefore,
+              rank_after: bAfter
+            }
+          });
+        }
       }
     }
   }
@@ -681,6 +798,221 @@ export function checkAchievements(context: AchievementContext): AchievementResul
               playerId: p.player_id,
               matchId,
               metadata: { span_days: spanDays, max_gap: maxGap }
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // ===== OPPONENT/HISTORY DETECTION =====
+  //
+  // Helper: the player's most recent matches (this match included, most
+  // recent first) with the set of opponents they faced in each — the raw
+  // material for the consecutive-games achievements below.
+  const getRecentOpponentRuns = (playerId: number, limit: number) => {
+    const matchRows = db.prepare(`
+      SELECT m.id as match_id
+      FROM match_participants mp
+      JOIN matches m ON mp.match_id = m.id
+      WHERE mp.player_id = ? AND m.game_id = ? AND m.id <= ? AND m.season_id = ?
+      ORDER BY m.played_at DESC, m.id DESC
+      LIMIT ?
+    `).all(playerId, gameId, matchId, seasonId, limit) as { match_id: number }[];
+
+    const myTeamStmt = db.prepare('SELECT team FROM match_participants WHERE match_id = ? AND player_id = ?');
+    const participantsStmt = db.prepare('SELECT player_id, team FROM match_participants WHERE match_id = ?');
+
+    return matchRows.map(row => {
+      const myTeam = (myTeamStmt.get(row.match_id, playerId) as { team: number } | undefined)?.team;
+      const parts = participantsStmt.all(row.match_id) as { player_id: number; team: number }[];
+      const opponentIds = [
+        ...new Set(parts.filter(p => p.team !== myTeam).map(p => p.player_id))
+      ];
+      return { matchId: row.match_id, opponentIds };
+    });
+  };
+
+  // Diversified: Play a different opponent in each of 7 consecutive games
+  // — all 7 opponents must be unique across the run. Awarded once per
+  // season: a qualifying 7-game window stays qualifying for the games that
+  // follow it, and repeating the achievement for the same run would be noise.
+  for (const p of participants) {
+    const existing = db.prepare(`
+      SELECT COUNT(*) as count FROM player_achievements pa
+      JOIN achievements a ON pa.achievement_id = a.id
+      WHERE pa.player_id = ? AND pa.game_id = ? AND pa.season_id = ? AND a.name = 'diversified'
+    `).get(p.player_id, gameId, seasonId) as { count: number };
+    if (existing.count > 0) continue;
+
+    const run = getRecentOpponentRuns(p.player_id, 7);
+    if (run.length < 7) continue;
+
+    const seen = new Set<number>();
+    let allUnique = true;
+    for (const match of run) {
+      if (match.opponentIds.length === 0) {
+        allUnique = false;
+        break;
+      }
+      for (const opponentId of match.opponentIds) {
+        if (seen.has(opponentId)) {
+          allUnique = false;
+          break;
+        }
+        seen.add(opponentId);
+      }
+      if (!allUnique) break;
+    }
+
+    if (allUnique) {
+      results.push({
+        achievementName: 'diversified',
+        playerId: p.player_id,
+        matchId,
+        metadata: { opponents: run.map(m => playerNameMap.get(m.opponentIds[0])) }
+      });
+    }
+  }
+
+  // Codependent: Play the same opponent in each of 5 consecutive games.
+  // Per-opponent dedup (the_dominator style): a longer spell with the same
+  // opponent shouldn't re-award it game after game.
+  for (const p of participants) {
+    const run = getRecentOpponentRuns(p.player_id, 5);
+    if (run.length < 5 || run[0].opponentIds.length === 0) continue;
+
+    const firstOpponents = [...run[0].opponentIds].sort();
+    const sameOpponent = run.every(match => {
+      if (match.opponentIds.length !== firstOpponents.length) return false;
+      const sorted = [...match.opponentIds].sort();
+      return sorted.every((id, idx) => id === firstOpponents[idx]);
+    });
+    if (!sameOpponent) continue;
+
+    const opponentId = firstOpponents[0];
+    const opponentName = playerNameMap.get(opponentId) ?? '';
+    const existing = db.prepare(`
+      SELECT COUNT(*) as count FROM player_achievements pa
+      JOIN achievements a ON pa.achievement_id = a.id
+      WHERE pa.player_id = ? AND pa.game_id = ? AND pa.season_id = ? AND a.name = 'codependent'
+        AND JSON_EXTRACT(pa.metadata, '$.opponent') = ?
+    `).get(p.player_id, gameId, seasonId, opponentName) as { count: number };
+    if (existing.count > 0) continue;
+
+    results.push({
+      achievementName: 'codependent',
+      playerId: p.player_id,
+      matchId,
+      metadata: { opponent: opponentName, games: 5 }
+    });
+  }
+
+  // Revenge Tour: Lose to someone, then beat them in a rematch that same
+  // day. The loss must be the most recent meeting — otherwise this would
+  // fire for every win following any old loss that day.
+  if (!isDraw) {
+    for (const winnerId of winnerIds) {
+      for (const loserId of loserIds) {
+        const prior = db.prepare(`
+          SELECT m.played_at, mp1.score as player_score, mp2.score as opponent_score
+          FROM matches m
+          JOIN match_participants mp1 ON m.id = mp1.match_id AND mp1.player_id = ?
+          JOIN match_participants mp2 ON m.id = mp2.match_id AND mp2.player_id = ?
+          WHERE m.game_id = ? AND m.id < ? AND m.season_id = ? AND mp1.team != mp2.team
+          ORDER BY m.played_at DESC, m.id DESC
+          LIMIT 1
+        `).get(winnerId, loserId, gameId, matchId, seasonId) as
+          | { played_at: string; player_score: number; opponent_score: number }
+          | undefined;
+
+        if (!prior) continue;
+        if (prior.player_score >= prior.opponent_score) continue; // not a loss
+        if (prior.played_at.split(' ')[0] !== playedAtDb.split(' ')[0]) continue; // not the same day
+
+        results.push({
+          achievementName: 'revenge_tour',
+          playerId: winnerId,
+          matchId,
+          metadata: {
+            opponent: playerNameMap.get(loserId),
+            lost_score: prior.player_score,
+            won_score: maxScore
+          }
+        });
+      }
+    }
+  }
+
+  // Streak-Breaker: End an opponent's 5+ game winning streak.
+  if (!isDraw) {
+    const streakBreakAwarded = new Set<number>();
+    for (const loserId of loserIds) {
+      const recent = db.prepare(`
+        SELECT
+          mp.score as player_score,
+          (SELECT MAX(mp2.score) FROM match_participants mp2 WHERE mp2.match_id = mp.match_id AND mp2.team != mp.team) as opponent_score
+        FROM match_participants mp
+        JOIN matches m ON mp.match_id = m.id
+        WHERE mp.player_id = ? AND m.game_id = ? AND m.id < ? AND m.season_id = ?
+        ORDER BY m.played_at DESC, m.id DESC
+        LIMIT 6
+      `).all(loserId, gameId, matchId, seasonId) as { player_score: number; opponent_score: number }[];
+
+      let streak = 0;
+      for (const prior of recent) {
+        if (prior.player_score > prior.opponent_score) streak++;
+        else break;
+      }
+      if (streak < 5) continue;
+
+      for (const winnerId of winnerIds) {
+        // One entry per breaker even if several streaking victims fell at once
+        if (streakBreakAwarded.has(winnerId)) continue;
+        streakBreakAwarded.add(winnerId);
+        results.push({
+          achievementName: 'streak_breaker',
+          playerId: winnerId,
+          matchId,
+          metadata: { victim: playerNameMap.get(loserId), streak }
+        });
+      }
+    }
+  }
+
+  // Agreeable: Draw 3 times in a row. Best-of (fixed-total) games only —
+  // a "first to X" game can't legitimately end level. Once per season,
+  // since a drawn run stays qualifying for as long as it keeps going.
+  if (isBestOf) {
+    for (const p of participants) {
+      const recentMatches = db.prepare(`
+        SELECT
+          mp.score as player_score,
+          (SELECT MAX(mp2.score) FROM match_participants mp2 WHERE mp2.match_id = mp.match_id AND mp2.team != mp.team) as opponent_score
+        FROM match_participants mp
+        JOIN matches m ON mp.match_id = m.id
+        WHERE mp.player_id = ? AND m.game_id = ? AND m.id <= ? AND m.season_id = ?
+        ORDER BY m.played_at DESC, m.id DESC
+        LIMIT 3
+      `).all(p.player_id, gameId, matchId, seasonId) as { player_score: number; opponent_score: number }[];
+
+      if (recentMatches.length === 3) {
+        const allDraw = recentMatches.every(m =>
+          m.player_score === m.opponent_score && m.player_score === recentMatches[0].player_score
+        );
+        if (allDraw) {
+          const existing = db.prepare(`
+            SELECT COUNT(*) as count FROM player_achievements pa
+            JOIN achievements a ON pa.achievement_id = a.id
+            WHERE pa.player_id = ? AND pa.game_id = ? AND pa.season_id = ? AND a.name = 'agreeable'
+          `).get(p.player_id, gameId, seasonId) as { count: number };
+
+          if (existing.count === 0) {
+            results.push({
+              achievementName: 'agreeable',
+              playerId: p.player_id,
+              matchId,
+              metadata: { score: recentMatches[0].player_score }
             });
           }
         }

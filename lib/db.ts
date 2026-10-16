@@ -288,7 +288,15 @@ const seedAchievements = db.prepare(`
     ('early_bird', 'Play and win the first game of the day', 'special', '🌅'),
     ('the_dominator', 'Defeat a player in 10 consecutive games', 'streak', '💪'),
     ('nothing_if_not_consistent', 'Finish 5 consecutive games with the same score', 'streak', '🎯'),
-    ('boss_fight', 'Defeat the #1 ranked player in the ladder', 'special', '⚔️')
+    ('boss_fight', 'Defeat the #1 ranked player in the ladder', 'special', '⚔️'),
+    ('the_frustrator', 'Score exactly one point in defeat, denying your opponent a flawless win', 'special', '😤'),
+    ('switcharoo', 'Swap ladder positions with your opponent', 'ranking', '🔀'),
+    ('diversified', 'Play a different opponent in each of 7 consecutive games', 'streak', '🎨'),
+    ('giant_slayer', 'Beat a player ranked in the top 3 while you sit outside it', 'special', '🗡️'),
+    ('codependent', 'Play the same opponent 5 times in a row', 'streak', '🧲'),
+    ('revenge_tour', 'Lose to someone, then beat them in a rematch that same day', 'special', '💣'),
+    ('agreeable', 'Draw 3 games in a row', 'streak', '🕊️'),
+    ('streak_breaker', 'End someone''s 5 or more game winning streak', 'streak', '🛑')
 `);
 seedAchievements.run();
 
@@ -490,6 +498,14 @@ const updateAchievementIcons = db.prepare(`
     WHEN 'the_dominator' THEN '💪'
     WHEN 'nothing_if_not_consistent' THEN '🎯'
     WHEN 'boss_fight' THEN '⚔️'
+    WHEN 'the_frustrator' THEN '😤'
+    WHEN 'switcharoo' THEN '🔀'
+    WHEN 'diversified' THEN '🎨'
+    WHEN 'giant_slayer' THEN '🗡️'
+    WHEN 'codependent' THEN '🧲'
+    WHEN 'revenge_tour' THEN '💣'
+    WHEN 'agreeable' THEN '🕊️'
+    WHEN 'streak_breaker' THEN '🛑'
     ELSE icon
   END
   WHERE icon IS NULL OR icon = ''
