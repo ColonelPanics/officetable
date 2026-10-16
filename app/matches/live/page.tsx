@@ -64,8 +64,8 @@ function LiveMatchContent() {
   const [events, setEvents] = useState<PointTimelineEvent[]>([]);
   const [startedAt, setStartedAt] = useState<string | null>(null);
   const [finishedAt, setFinishedAt] = useState<string | null>(null);
-  // Ticks the elapsed clock; value itself unused beyond triggering renders.
-  const [, setTick] = useState(0);
+  // Ticks to recompute the elapsed clock every second while scoring.
+  const [tick, setTick] = useState(0);
   const [resumed, setResumed] = useState(false);
   const [draftLoaded, setDraftLoaded] = useState(false);
   // Open gamble matches for the selected game (rosters exposed so the
@@ -228,11 +228,13 @@ function LiveMatchContent() {
     return computeTimelineStats(timeline, [score1, score2]);
   }, [startedAt, finishedAt, events, score1, score2]);
 
+  // `tick` is a dependency on purpose: it forces the clock to recompute
+  // (and the header to re-render) once a second while the match is live.
   const elapsedMs = useMemo(() => {
     if (!startedAt) return 0;
     const end = finishedAt ? new Date(finishedAt).getTime() : Date.now();
     return end - new Date(startedAt).getTime();
-  }, [startedAt, finishedAt]);
+  }, [startedAt, finishedAt, tick]);
 
   const availablePlayers = players.filter(
     (p) => !team1Players.includes(p.id) && !team2Players.includes(p.id)
