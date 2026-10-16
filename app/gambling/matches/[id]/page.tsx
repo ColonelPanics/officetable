@@ -403,8 +403,8 @@ export default function GambleMatchPage() {
                   </details>
                   <p className="text-[11px] text-gray-400">
                     Settling pays every bet, splits entries by score against the evens line after the 10% house fee,
-                    and whatever remains in the pot splits 50% house / 25% to the winner / 25% by score. Team gambles
-                    with more than one player per side settle through the manual form.
+                    and whatever remains in the pot splits 50% house / 25% to the winner / 25% by score. The manual
+                    form exists in case recording elsewhere isn't possible — it settles exactly the same way.
                   </p>
                 </div>
               )}

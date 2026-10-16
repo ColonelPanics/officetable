@@ -4,7 +4,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import db from '@/lib/db';
-import { syncStatuses, deriveStatus, getBetPool, getChallengeSlots } from '@/lib/gamble';
+import { syncStatuses, deriveStatus, getBetPool, getChallengeSlots, getGambleParticipants } from '@/lib/gamble';
 import { getBank, isBankLinked } from '@/lib/bank';
 import { gambleErrorResponse } from '@/lib/gambleApi';
 import type { Challenge, GambleMatch, OddsLadder } from '@/lib/types';
@@ -101,6 +101,9 @@ export async function GET(request: NextRequest) {
         pool: getBetPool(row.id),
         top_odds: top,
         predicted: ladder.predictedLine,
+        // Full seat roster — lets other surfaces (the live scorer's bet-attach
+        // banner) match a lineup against team gambles too, any side order.
+        participants: getGambleParticipants(row.id),
       };
     });
 

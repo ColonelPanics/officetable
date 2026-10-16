@@ -222,42 +222,78 @@ export async function POST(request: NextRequest) {
       timeline = checked.timeline;
     }
 
-    // Gamble settle hook: a 1v1 record whose two participants match an open
-    // gamble match (either orientation) settles that gamble — the match is
-    // recorded once, through settleGambleMatch's own processMatch.
+    // Gamble settle hook: a two-team record whose roster seats match an open
+    // gamble match (either side order — red/blue sides compare as SETS, so
+    // A & B vs B & A on Team 1 both attach) settles that gamble — team gambles
+    // (1v2, 2v2…) included. The match is recorded once, through
+    // settleGambleMatch's own processMatch.
     //
     // Trust guard: settling moves real money (player shares + the pot), so the
-    // hook only fires when the record comes from one of the two participants
-    // (pass `recorded_by` = your player id; the gamble match page does this via
-    // its own settle route). A third-party record that matches an open gamble
-    // is rejected — it must not settle the pot, and it must not double-record
-    // the match that the participants' settle will record. If no gamble
-    // matches, recording behaves exactly as before.
+    // hook only fires when the record comes from a rostered player (pass
+    // `recorded_by` = your player id; the gamble match page does this via its
+    // own settle route). A third-party record that matches an open gamble is
+    // rejected — it must not settle the pot, and it must not double-record the
+    // match that the participants' settle will record. If no gamble matches,
+    // recording behaves exactly as before.
     syncStatuses();
-    const isSolo = (t: CreateMatchInput['teams'][number]) => t.player_ids?.length === 1;
-    if (teams.length === 2 && isSolo(teams[0]) && isSolo(teams[1])) {
-      const [aId, bId] = [teams[0].player_ids[0], teams[1].player_ids[0]];
+    const hasPlayers = (t: CreateMatchInput['teams'][number]) => Array.isArray(t.player_ids) && t.player_ids.length > 0;
+    if (teams.length === 2 && hasPlayers(teams[0]) && hasPlayers(teams[1])) {
+      // Seat sets (deduped, order-free) for both recorded sides
+      const side0Ids = [...new Set(teams[0].player_ids)];
+      const side1Ids = [...new Set(teams[1].player_ids)];
       let recordedBy: number | null = null;
       if (body.recorded_by != null) {
         try { recordedBy = requirePlayerId(body.recorded_by); } catch { recordedBy = null; }
       }
-      const gmRow = db.prepare(`
-        SELECT id, red_player_id, blue_player_id FROM gamble_matches
-        WHERE status IN ('open', 'awaiting_score')
-          AND ((red_player_id = ? AND blue_player_id = ?) OR (red_player_id = ? AND blue_player_id = ?))
+
+      // Candidate open gambles for this game — match on full roster seat sets,
+      // either orientation (gamble_match_participants is backfilled for all
+      // legacy 1v1s, so the roster table is always complete).
+      const openGambleRows = db.prepare(`
+        SELECT id FROM gamble_matches
+        WHERE game_id = ? AND status IN ('open', 'awaiting_score')
         ORDER BY id DESC
-      `).get(aId, bId, bId, aId) as { id: number; red_player_id: number; blue_player_id: number } | undefined;
-      if (gmRow) {
+      `).all(game_id) as { id: number }[];
+      const rosterStmt = db.prepare(`
+        SELECT team, player_id FROM gamble_match_participants WHERE gamble_match_id = ?
+      `);
+      const sameSeats = (a: number[], b: number[]) =>
+        a.length === b.length && [...a].sort((x, y) => x - y).every((v, i) => v === [...b].sort((x, y) => x - y)[i]);
+
+      let attached: { gambleId: number; redTeam: CreateMatchInput['teams'][number]; blueTeam: CreateMatchInput['teams'][number]; rosterAll: number[] } | null = null;
+      for (const gmRow of openGambleRows) {
+        const roster = rosterStmt.all(gmRow.id) as { team: number; player_id: number }[];
+        const seat0 = [...new Set(roster.filter(r => r.team === 0).map(r => r.player_id))];
+        const seat1 = [...new Set(roster.filter(r => r.team === 1).map(r => r.player_id))];
+        let redTeam: CreateMatchInput['teams'][number]
+        let blueTeam: CreateMatchInput['teams'][number]
+        if (sameSeats(side0Ids, seat0) && sameSeats(side1Ids, seat1)) {
+          redTeam = teams[0]; blueTeam = teams[1];
+        } else if (sameSeats(side0Ids, seat1) && sameSeats(side1Ids, seat0)) {
+          redTeam = teams[1]; blueTeam = teams[0];
+        } else {
+          continue;
+        }
+        attached = {
+          gambleId: gmRow.id,
+          redTeam,
+          blueTeam,
+          rosterAll: [...new Set(roster.map(r => r.player_id))],
+        };
+        break;
+      }
+
+      if (attached) {
         // Settling a gamble moves real money, so under the session model the
-        // recorder must be LOGGED IN AS a participant — a body-supplied
+        // recorder must be LOGGED IN AS a rostered player — a body-supplied
         // recorded_by alone is forgeable by anyone who can reach the API.
         const sessionPlayer = await readSessionPlayer();
         if (sessionPlayer === null) {
           return NextResponse.json(
             {
-              error: 'This result settles an open gamble — log in (top right) as one of the two participants to record it',
+              error: 'This result settles an open gamble — log in (top right) as one of the participants to record it',
               code: 'not_logged_in',
-              gamble_match_id: gmRow.id,
+              gamble_match_id: attached.gambleId,
             },
             { status: 403 }
           );
@@ -268,44 +304,42 @@ export async function POST(request: NextRequest) {
             { status: 403 }
           );
         }
-        if (sessionPlayer !== aId && sessionPlayer !== bId) {
-        if (recordedBy === null || (recordedBy !== aId && recordedBy !== bId)) {
+        if (!attached.rosterAll.includes(sessionPlayer)) {
+          // recorded_by (when supplied) must equal the session player — checked
+          // above — so a forged "recording on behalf of" a participant never
+          // gets past this gate either.
           return NextResponse.json(
             {
-              error: 'This result settles an open gamble — only one of the two participants may record it (from the gamble match page, or pass recorded_by)',
+              error: 'This result settles an open gamble — only one of its participants may record it (from the gamble match page, or logged in as themselves)',
               code: 'not_a_participant',
-              gamble_match_id: gmRow.id,
+              gamble_match_id: attached.gambleId,
             },
             { status: 409 }
           );
         }
-        }
-        const [redTeam, blueTeam] = teams[0].player_ids[0] === gmRow.red_player_id
-          ? [teams[0], teams[1]]
-          : [teams[1], teams[0]];
         let summary;
         try {
-          summary = settleGambleMatch(gmRow.id, [redTeam, blueTeam], notes, timeline);
+          summary = settleGambleMatch(attached.gambleId, [attached.redTeam, attached.blueTeam], notes, timeline);
         } catch (e) {
           // Gamble-side rejections (bets still open, teams mismatch…) surface
           // as their own message — a plain "failed to create match" would
-          // confuse the live scorer / recorder who don't know gamble is
-          // attached to this game pair.
+          // confuse the live scorer / recorder who don't know a gamble is
+          // attached to this matchup.
           if (e instanceof GambleError) {
             return NextResponse.json(
-              { error: e.message, code: e.code, gamble_match_id: gmRow.id },
+              { error: e.message, code: e.code, gamble_match_id: attached.gambleId },
               { status: 409 }
             );
           }
           throw e;
         }
-        const gmFull = getGambleMatch(gmRow.id)!;
+        const gmFull = getGambleMatch(attached.gambleId)!;
         announceSettled(gmFull, summary).catch(err => console.error('gamble announce failed:', err));
         revalidatePath('/', 'layout');
         // match_id returned so the live scorer routes to the match report it
         // just generated (the bet attach itself is invisible from the
         // recorder's side — it's just a normal match record to them).
-        return NextResponse.json({ success: true, gamble_match_id: gmRow.id, match_id: summary.matchId, summary }, { status: 201 });
+        return NextResponse.json({ success: true, gamble_match_id: attached.gambleId, match_id: summary.matchId, summary }, { status: 201 });
       }
     }
 

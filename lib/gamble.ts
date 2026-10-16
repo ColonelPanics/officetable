@@ -962,9 +962,6 @@ export function settleGambleMatch(
   if (!sameSeats(redTeam.player_ids, rosterRed) || !sameSeats(blueTeam.player_ids, rosterBlue)) {
     throw new GambleError('Teams do not match the gamble match participants', 'teams_mismatch');
   }
-  const redPlayerId = redTeam.player_ids[0];
-  const bluePlayerId = blueTeam.player_ids[0];
-
   const redScore = redTeam.score;
   const blueScore = blueTeam.score;
   if (!Number.isInteger(redScore) || !Number.isInteger(blueScore)
@@ -995,13 +992,15 @@ export function settleGambleMatch(
       throw new GambleError('Match already settled', 'already_settled');
     }
 
-    // 1. Record the real match via the existing Elo flow
+  // 1. Record the real match via the existing Elo flow — the FULL roster
+  //    (every seat contributes to the team Elo sum), matching what the
+  //    correction replay records.
     const processed = processMatch({
       game_id: gm.game_id,
       notes: notes ?? undefined,
       teams: [
-        { team: 0, player_ids: [redPlayerId], score: redScore },
-        { team: 1, player_ids: [bluePlayerId], score: blueScore },
+        { team: 0, player_ids: rosterRed, score: redScore },
+        { team: 1, player_ids: rosterBlue, score: blueScore },
       ],
       timeline,
     }, new Date());

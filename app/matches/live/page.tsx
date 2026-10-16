@@ -68,9 +68,14 @@ function LiveMatchContent() {
   const [, setTick] = useState(0);
   const [resumed, setResumed] = useState(false);
   const [draftLoaded, setDraftLoaded] = useState(false);
-  // Open gamble matches for the selected game (1v1s whose seats match the
-  // picked players get a "recording settles this bet" banner).
-  const [openGambles, setOpenGambles] = useState<{ id: number; red_player_id: number; blue_player_id: number }[]>([]);
+  // Open gamble matches for the selected game (rosters exposed so the
+  // banner can match any team shape, either side order).
+  const [openGambles, setOpenGambles] = useState<{
+    id: number;
+    red_player_id: number;
+    blue_player_id: number;
+    participants?: { team: number; player_id: number }[];
+  }[]>([]);
 
   // Honour ?game= pre-selection (same as the normal record page)
   useEffect(() => {
@@ -233,16 +238,26 @@ function LiveMatchContent() {
     (p) => !team1Players.includes(p.id) && !team2Players.includes(p.id)
   );
 
-  // When both sides are single players, an open/awaiting gamble match whose
-  // seats match this lineup settles the moment the match is recorded (the
-  // leaderboard's record-and-attach hook) — surface that BEFORE they start.
+  // When the picked players exactly cover a rostered side pair (RED and BLUE
+  // seats compared as sets — A & B vs B & A on Team 1 are the same lineup),
+  // an open/awaiting gamble settles the moment the match is recorded —
+  // surface that BEFORE they start. Works for team gambles too (1v2, 2v2…).
   const attachableGambles = useMemo(() => {
-    if (team1Players.length !== 1 || team2Players.length !== 1) return [];
-    const a = team1Players[0];
-    const b = team2Players[0];
-    return openGambles.filter(
-      (g) => (g.red_player_id === a && g.blue_player_id === b) || (g.red_player_id === b && g.blue_player_id === a)
-    );
+    if (team1Players.length === 0 || team2Players.length === 0) return [];
+    const sideA = [...new Set(team1Players)].sort((x, y) => x - y);
+    const sideB = [...new Set(team2Players)].sort((x, y) => x - y);
+    const sameSeats = (a: number[], b: number[]) =>
+      a.length === b.length && a.every((v, i) => v === b[i]);
+    return openGambles.filter(g => {
+      const roster = g.participants?.length
+        ? g.participants.map(p => ({ team: p.team as number, player_id: p.player_id as number }))
+        : (Number.isInteger(g.red_player_id) && Number.isInteger(g.blue_player_id))
+          ? [{ team: 0 as number, player_id: g.red_player_id }, { team: 1 as number, player_id: g.blue_player_id }]
+          : [];
+      const seat0 = [...new Set(roster.filter(r => r.team === 0).map(r => r.player_id))].sort((x, y) => x - y);
+      const seat1 = [...new Set(roster.filter(r => r.team === 1).map(r => r.player_id))].sort((x, y) => x - y);
+      return (sameSeats(sideA, seat0) && sameSeats(sideB, seat1)) || (sameSeats(sideA, seat1) && sameSeats(sideB, seat0));
+    });
   }, [openGambles, team1Players, team2Players]);
 
   async function handleSubmit() {

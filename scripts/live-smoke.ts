@@ -5,7 +5,7 @@
 import db from '../lib/db';
 import { processMatch, correctMatch } from '../lib/elo';
 import { getBank } from '../lib/bank';
-import { createChallenge, respondToChallenge, settleGambleMatch, correctGambleScore, syncStatuses } from '../lib/gamble';
+import { createChallenge, createTeamChallenge, respondToChallenge, settleGambleMatch, correctGambleScore, syncStatuses } from '../lib/gamble';
 import { recalculateAchievementsForGame, deleteAchievementsForMatch } from '../lib/achievements';
 import { getPunditryForMatch } from '../lib/punditry';
 import { validatePointTimeline, parsePointTimeline, computeTimelineStats } from '../lib/timeline';
@@ -321,6 +321,52 @@ const teams: CreateMatchInput['teams'] = [
     rowB !== null && rowB.events.length === 10 && rowB.events[9].team === 0,
     'correction with a supplied timeline records the corrected point order'
   );
+
+  // D: TEAM gamble attach — a 2v2 recording with its sides (any seat order)
+  // settles it; the recorded match carries the FULL roster + the timeline.
+  const teamNames = [`GamblerR2-${Date.now()}`, `GamblerB2-${Date.now()}`, `GamblerB3-${Date.now()}`];
+  const teamIds = teamNames.map(n => (db.prepare('INSERT INTO players (name) VALUES (?)').run(n).lastInsertRowid as number));
+  for (const id of teamIds) bank.ensureAccount(id);
+  const [r2, b3, b4] = teamIds;
+
+  const c3 = createTeamChallenge(
+    gameId, gIds[0], [gIds[0], r2], [b3, b4],
+    { entryFee: 30, scheduledAt: localIn(6 * 60_000 + 30_000), side: 'red' }
+  );
+  // Each named seat holder accepts (the maker accepted at creation)
+  respondToChallenge(c3, r2, 'accept');
+  respondToChallenge(c3, b3, 'accept');
+  const doneD = respondToChallenge(c3, b4, 'accept');
+  const gmD = doneD.gambleMatch!;
+  assert(gmD.status === 'open', '2v2 gamble opens when the shape completes');
+
+  fastForward(gmD.id);
+  // Red comes back from 4 down to win 6-4 — comeback in a TEAM gamble.
+  const teamComeback = [1, 1, 1, 1, 0, 0, 0, 0, 0, 0].map((team, i) => ({ team, at: (i + 1) * 45_000 }));
+  const sumD = settleGambleMatch(
+    gmD.id,
+    [
+      { team: 0, player_ids: [r2, gIds[0]], score: 6 }, // reversed seat order — still the same red side
+      { team: 1, player_ids: [b3, b4], score: 4 },
+    ],
+    'live smoke: 2v2 attached',
+    { start: START, end: '2026-01-15T10:09:00.000Z', events: teamComeback }
+  );
+  assert(sumD.matchId > 0, '2v2 attached-settle records a real match');
+  const partsD = db.prepare(`
+    SELECT mp.player_id, mp.team FROM match_participants mp WHERE mp.match_id = ? ORDER BY mp.team, mp.id
+  `).all(sumD.matchId) as { player_id: number; team: number }[];
+  const dSide = (team: number) => partsD.filter(p => p.team === team).map(p => p.player_id).sort((x, y) => x - y);
+  assert(dSide(0).join(',') === [gIds[0], r2].sort((x, y) => x - y).join(','), '2v2 match records BOTH red seats');
+  assert(dSide(1).join(',') === [b3, b4].sort((x, y) => x - y).join(','), '2v2 match records BOTH blue seats');
+  assert(partsD.length === 4, '2v2 match participants = full roster (4 rows)');
+  assert(hasAchievement(sumD.matchId, 'comeback_kid', r2), 'comeback_kid for the winning side member');
+  assert(hasAchievement(sumD.matchId, 'comeback_kid', gIds[0]), 'comeback_kid for the other winning side member');
+  const dTimeline = parsePointTimeline(
+    (db.prepare('SELECT points_timeline FROM matches WHERE id = ?').get(sumD.matchId) as { points_timeline: string }).points_timeline
+  );
+  assert(dTimeline !== null && dTimeline.events.length === 10 && dTimeline.events[4].team === 0,
+    '2v2 attached settle carries the timeline');
 }
 
 console.log(process.exitCode ? 'SMOKE FAILED' : 'LIVE SMOKE OK');
