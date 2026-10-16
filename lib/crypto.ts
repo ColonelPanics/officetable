@@ -73,7 +73,7 @@ export function migratePlaintextSecrets(): void {
       if (rows.length) console.log(`[bank] re-encrypted ${rows.length} bank password(s) at rest`);
     }
     const settings = db.prepare(
-      `SELECT key, value FROM settings WHERE key IN ('alces_house_password', 'alces_service_token') AND value NOT LIKE 'enc:v1:%'`
+      `SELECT key, value FROM settings WHERE key = 'alces_service_token' AND value NOT LIKE 'enc:v1:%'`
     ).all() as { key: string; value: string }[];
     const upsert = db.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`);
     for (const row of settings) upsert.run(row.key, encryptSecret(row.value));

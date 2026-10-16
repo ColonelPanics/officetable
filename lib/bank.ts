@@ -26,9 +26,7 @@
 import db from './db';
 import { decryptSecret, encryptSecret } from './crypto';
 import {
-  AlcesBankError,
   alcesBalance,
-  alcesConfig,
   alcesMirrorEnabled,
   alcesServiceBalance,
   alcesServiceTransfer,
@@ -256,14 +254,13 @@ export async function linkBankAccount(
   if (!alcesMirrorEnabled()) {
     throw new BankError('Central bank is not configured', 'bank_disabled');
   }
-  await ensureAlcesHouse();
 
   if (action === 'create') {
     await registerAlcesUser(username, password); // 409 already_taken surfaces to the user
   }
   // Handshake before anything is stored: wrong creds surface right here as a
-  // 401, never later as a failed transfer (or a payout into someone else's
-  // account — the house pays the LINKED username).
+  // 401, never later as a failed transfer (legs authenticate as the LINKED
+  // player — a mis-typed login could park payouts on someone else's account).
   await loginAlcesUser(username, password);
 
   const balance = (await alcesBalance(username)) ?? 0;
@@ -287,57 +284,9 @@ export function unlinkBankAccount(playerId: number): void {
   `).run(playerId);
 }
 
-/**
- * Boot-time bookie assets: register the site's house user on the central
- * bank if it doesn't exist (registration mints it 500 — that IS our reserve).
- */
-let houseReady: Promise<void> | null = null;
-export function ensureAlcesHouse(): Promise<void> {
-  if (!houseReady) {
-    houseReady = (async () => {
-      if (!alcesMirrorEnabled()) return;
-      // The house registers once-ever: the flag persists in settings so we
-      // never re-POST the registration on later drains (the bank would only
-      // 409 it, but each attempt is traffic the down/shared API shouldn't
-      // see). Clear 'alces_house_registered' in settings to force a re-probe.
-      const { houseUser, housePassword } = alcesConfig();
-      if (!housePassword) throw new BankError('No house password available', 'bank_disabled');
-      // The flag stores WHICH house user was registered/verified — it is
-      // re-probed (idempotently) whenever ALCES_HOUSE_USER changes.
-      const registeredFlag = db.prepare(`SELECT value FROM settings WHERE key = 'alces_house_registered'`)
-        .get() as { value: string } | undefined;
-      if (registeredFlag?.value === houseUser) return;
-      try {
-        await registerAlcesUser(houseUser, housePassword);
-      } catch (e) {
-        if (!(e instanceof AlcesBankError && e.code === 'already_taken')) throw e;
-        // The bank already has this house username — but is it OURS? If its
-        // password differs from this site's, every house→player payout will
-        // 401 forever (silently, via the sync backlog). Prove the handshake
-        // now so the site either runs or fails loudly with a fixable message.
-        try {
-          await loginAlcesUser(houseUser, housePassword);
-        } catch {
-          throw new BankError(
-            `The central bank already has a house account "${houseUser}" but its password does not match this site's — every payout would fail. Set ALCES_HOUSE_PASSWORD to that account's real bank password (or point ALCES_HOUSE_USER at this site's own house account), then clear the 'alces_house_registered' setting to retry.`,
-            'house_credentials_mismatch',
-          );
-        }
-      }
-      db.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES ('alces_house_registered', ?)`)
-        .run(houseUser);
-    })().catch(e => {
-      // Don't cache the failure: one bank outage must not poison every later
-      // link/sync attempt until a server restart. Clear and let it retry.
-      houseReady = null;
-      throw e;
-    });
-  }
-  return houseReady;
-}
-
 /** Ledger rows still waiting to reach (or that failed to reach) the central bank.
  *  'sending' rows count too: a crash can leave one mid-flight, and if nothing else
+
  *  is queued it must still trigger a drain (the drainer verifies before resending). */
 export function bankSyncBacklog(): { pending: number; failed: number; unverified: number; sending: number } {
   const row = db.prepare(`
@@ -479,9 +428,8 @@ export async function drainBankSync(): Promise<void> {
   draining = true;
   let progress = false;
   try {
-    // Bookie legs NEVER touch the house user — the counterparty is our
-    // service pot, resolved from the token. (ensureAlcesHouse stays in the
-    // link path, where account registration actually needs it.)
+    // Every leg is player↔pot: the counterparty is our service pot, resolved
+    // from the token — there is no house user on the bank any more.
     const jobs = db.prepare(`
       SELECT id, transaction_id, legs FROM bank_sync
       WHERE status IN ('pending', 'failed', 'sending', 'unverified')
@@ -655,9 +603,8 @@ export async function reconcileAlcesBalances(): Promise<void> {
   } catch {
     return; // unreachable right now — try again on the next drain
   }
-  // Also read our service pot's balance (the 2026-10 format's house truth —
-  // see applyBalanceResync). A failed read just degrades to the legacy
-  // house-user-only snap below.
+  // Also read our service pot's balance — the house's central truth (see
+  // applyBalanceResync). A failed read just leaves the pot unsnapped this round.
   const potBalance = await alcesServiceBalance();
   applyBalanceResync(balances, potBalance);
 }
@@ -666,9 +613,9 @@ export async function reconcileAlcesBalances(): Promise<void> {
  *  and house). Exported for tests; reconcileAlcesBalances is its only
  *  production caller. Every non-dust delta is ledgered as a 'resync' row
  *  (player_id NULL for the house), NOT queued to bank_sync — these rows
- *  describe movements that already exist centrally. `potBalance` is our
- *  service pot's balance (null = unreadable → house truth degrades to the
- *  legacy house-user balance alone). */
+ *  describe movements that already exist centrally. `potBalance` is our service
+ *  pot's balance — the house's only central truth; null = unreadable → the
+ *  house projection is left alone this round. */
 export function applyBalanceResync(balances: Map<string, number>, potBalance: number | null = null): void {
   const rows = db.prepare(`
     SELECT player_id, balance, bank_username FROM bank_accounts
@@ -699,22 +646,15 @@ export function applyBalanceResync(balances: Map<string, number>, potBalance: nu
         .run(truth, row.player_id);
     })();
   }
-  // The house pot's central truth is the bookie SERVICE pot under the
-  // 2026-10 format — stakes pay in and payouts pay out of the pot resolved
-  // from our service token (GET /services/{name}). The legacy house user's
-  // balance still counts alongside it: its mint and all pre-migration
-  // mirrors are stranded there (nothing can move them into the pot), but
-  // they remain house assets. Snap onto the combined truth so payout/bet
-  // caps use the REAL bank holdings (a fresh reset otherwise shows a 0 pot
-  // and blocks bets). Cheap secret-free reads throughout — resync never
-  // needs to decrypt credentials (it only reads balances).
-  const houseUserSetting = db.prepare(`SELECT value FROM settings WHERE key = 'alces_house_user'`).get() as { value: string } | undefined;
-  const houseUser = process.env.ALCES_HOUSE_USER || houseUserSetting?.value || 'officetablehouse';
-  const houseTruthRaw = balances.get(houseUser); // undefined unless the legacy house user still exists
-  const houseTruth = potBalance === null
-    ? houseTruthRaw // degraded legacy behaviour: house user alone
-    : (houseTruthRaw ?? 0) + potBalance;
-  if (houseTruth === undefined) return;
+  // The house pot's central truth is the SERVICE POT alone (the 2026-10
+  // format): there is no house user on the bank any more — the site's house
+  // IS the pot resolved from the service token. Snap onto it so payout/bet
+  // caps use the REAL bank holdings (the pot starts empty; until the bookie
+  // funds it, the payout cap blocks bets). Cheap secret-free reads
+  // throughout — resync never needs to decrypt credentials (it only reads
+  // balances).
+  if (potBalance === null) return; // pot unreadable — house projection stays unsnapped this round
+  const houseTruth = potBalance;
   const houseDelta = Math.round((houseTruth - sqliteBank.getHouseBalance()) * 100) / 100;
   if (Math.abs(houseDelta) < BALANCE_EPS) {
     if (houseDelta !== 0) {
@@ -727,7 +667,7 @@ export function applyBalanceResync(balances: Map<string, number>, potBalance: nu
     db.prepare(`
       INSERT INTO bank_transactions (ref_type, ref_id, player_id, amount, memo)
       VALUES ('resync', NULL, NULL, ?, ?)
-    `).run(houseDelta, `house pot resynced to bookie truth (service pot${houseTruthRaw !== undefined ? ' + house user' : ''}, δ ${houseDelta > 0 ? '+' : ''}${houseDelta.toFixed(2)})`);
+    `).run(houseDelta, `house pot resynced to bookie truth (service pot, δ ${houseDelta > 0 ? '+' : ''}${houseDelta.toFixed(2)})`);
     db.prepare(`UPDATE bank_house SET balance = ? WHERE id = 1`).run(houseTruth);
   })();
 }

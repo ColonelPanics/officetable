@@ -7,6 +7,12 @@
 // player↔bookie-pot transfer through outbox rows (lib/bank.ts bank_sync).
 //
 // Probed behaviour worth remembering (migrated to the bank's 2026-10 API):
+//  - The site has NO bank user of its own: the house IS the service pot
+//    (the pot's balance from GET /services/{name}). The retired
+//    'officetablehouse' user's mint cannot be moved into the pot —
+//    pre-migration ledgers stranded it there; on a freshly-reset bank
+//    nothing needs to exist beyond the service itself. ALCES_HOUSE_USER and
+//    ALCES_HOUSE_PASSWORD are obsolete.
 //  - Balances are only readable via GET /users pagination (strings, can be
 //    fractional); GET /users/{username} answers 204 with no body.
 //  - Plain user-to-user transfers are now POST /users/transaction/{recipient}
@@ -50,8 +56,6 @@ export interface AlcesConfig {
   baseUrl: string;
   serviceToken: string | null;
   serviceName: string;
-  houseUser: string;
-  housePassword: string | null;
 }
 
 function setting(key: string): string | undefined {
@@ -73,30 +77,13 @@ function setSecretSetting(key: string, value: string): void {
 export function alcesConfig(): AlcesConfig {
   // Env first (never commit secrets), settings table as encrypted fallback.
   const serviceToken = envStr('ALCES_SERVICE_TOKEN') ?? secretSetting('alces_service_token') ?? null;
-  let housePassword = envStr('ALCES_HOUSE_PASSWORD') ?? secretSetting('alces_house_password') ?? null;
   if (serviceToken && !secretSetting('alces_service_token')) {
     setSecretSetting('alces_service_token', serviceToken);
-  }
-  if (!housePassword && serviceToken) {
-    // The house is the site's own bank user; its password is generated once
-    // and kept (encrypted) in settings — it must never change under the ledger.
-    housePassword = generateHousePassword();
-    setSecretSetting('alces_house_password', housePassword);
-  }
-  // The bank caps passwords at 30 chars; an older generation scheme stored a
-  // 35-char one that the bank can never accept (register always 400s). The
-  // house user is minted by whatever registration finally succeeds, so a
-  // regenerate-once here is safe.
-  if (housePassword && housePassword.length > PASSWORD_MAX) {
-    housePassword = generateHousePassword();
-    setSecretSetting('alces_house_password', housePassword);
   }
   return {
     baseUrl: (envStr('ALCES_BANK_URL') ?? setting('alces_bank_url') ?? DEFAULT_URL).replace(/\/$/, ''),
     serviceToken,
     serviceName: envStr('ALCES_SERVICE_NAME') ?? setting('alces_service_name') ?? 'officetable',
-    houseUser: envStr('ALCES_HOUSE_USER') ?? setting('alces_house_user') ?? 'officetablehouse',
-    housePassword,
   };
 }
 
@@ -115,10 +102,6 @@ const PASSWORD_MAX = 30;
 function envStr(name: string): string | undefined {
   const value = process.env[name];
   return value === undefined ? undefined : (value.trim() || undefined);
-}
-
-function generateHousePassword(): string {
-  return `ot-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
 }
 
 /** Suggested bank username for a player: their name flattened ("Adam B" → "AdamB"). */

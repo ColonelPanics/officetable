@@ -153,9 +153,10 @@ async function main() {
   }
   console.log(`Elo calibrated to live values: ${calibrated} (player, game, season) rows`);
 
-  // No house-pot seed either: the house reserve is the 'officetablehouse'
-  // bank user's own balance on the central bank (its 500 mint), and the pot
-  // accumulates from fees/stakes as gambles run.
+  // No house-pot seed: there is no house user on the bank any more — the
+  // house is the bookie SERVICE pot (its balance from GET /services/{name}),
+  // funded by the bookie admin; the pot accumulates from fees/stakes as
+  // gambles run.
 
   // --- report: local should now mirror live --------------------------------
   const finalCount = (db.prepare('SELECT COUNT(*) n FROM matches').get() as { n: number }).n;
