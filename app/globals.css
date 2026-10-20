@@ -220,3 +220,13 @@ body {
     visibility: hidden;
   }
 }
+
+/* Mobile: inputs at ≥16px stop iOS Safari auto-zooming the page on focus.
+   !important beats the Tailwind size utilities it's overriding. */
+@media (max-width: 767px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}

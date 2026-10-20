@@ -195,6 +195,7 @@ export default function LadderHistoryPage() {
 
           {/* Snapshot board */}
           <div className="bg-card rounded-xl shadow-lg overflow-hidden">
+            <div className="overflow-x-auto">
             <table className="min-w-full">
               <thead>
                 <tr className="bg-gradient-to-r from-slate-800 to-slate-900 border-b border-black/20">
@@ -264,6 +265,7 @@ export default function LadderHistoryPage() {
                 })}
               </tbody>
             </table>
+            </div>
           </div>
         </>
       )}

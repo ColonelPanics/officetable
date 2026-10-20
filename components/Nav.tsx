@@ -17,6 +17,7 @@ export function Nav() {
   const { settings, colorMode, setColorMode, resolvedTheme } = useTheme();
   const { selectedGame, selectedGameId, games, setSelectedGameId, isLoading } = useSelectedGame();
   const [showGameMenu, setShowGameMenu] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
   const pathname = usePathname();
   const router = useRouter();
@@ -33,11 +34,11 @@ export function Nav() {
 
   return (
     <nav className="bg-card/80 backdrop-blur-md border-b border-gray-200/50 sticky top-0 z-50">
-      <div className="max-w-6xl mx-auto px-6 py-3">
-        <div className="flex items-center justify-between">
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3">
+        <div className="flex items-center justify-between gap-2">
           {/* Brand and Game Selector */}
-          <div className="flex items-center gap-6">
-            <Link href="/" className="flex items-center gap-3 group">
+          <div className="flex items-center gap-3 sm:gap-6 min-w-0">
+            <Link href="/" className="flex items-center gap-3 group shrink-0">
               <div className="relative">
                 {settings.logo_url ? (
                   <img
@@ -51,13 +52,13 @@ export function Nav() {
                   </div>
                 )}
               </div>
-              <span className="text-xl font-bold text-gray-900 group-hover:text-primary transition-colors">
+              <span className="hidden sm:inline-block text-xl font-bold text-gray-900 group-hover:text-primary transition-colors">
                 {settings.company_name || 'Office Games'}
               </span>
             </Link>
 
-            {/* Game Selector */}
-            <div className="flex items-center gap-2 pl-6 border-l border-gray-200">
+            {/* Game Selector — always visible (the game context survives mobile) */}
+            <div className="flex items-center pl-3 sm:pl-6 border-l border-gray-200">
               {isLoading ? (
                 <div className="flex items-center gap-2 px-4 py-2 bg-gray-100 rounded-lg">
                   <div className="w-5 h-5 bg-gray-300 rounded animate-pulse" />
@@ -156,8 +157,8 @@ export function Nav() {
             </div>
           </div>
 
-          {/* Navigation Links */}
-          <div className="flex items-center gap-1">
+          {/* Navigation Links — desktop row; a hamburger panel below md */}
+          <div className="hidden md:flex items-center gap-1">
             <Link
               href="/"
               className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-primary hover:bg-gray-100 rounded-lg transition-all"
@@ -202,9 +203,14 @@ export function Nav() {
             >
               + Record Match
             </Link>
+          </div>
+
+          {/* Mobile: theme + burger — the links are unreachable otherwise (they
+              overflow off-screen on phones), so one burger holds them */}
+          <div className="flex items-center gap-1 md:hidden">
             <button
               onClick={() => setColorMode(nextMode[currentMode])}
-              className="p-2 text-sm text-gray-600 hover:text-primary hover:bg-gray-100 rounded-lg transition-all"
+              className="p-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
               title={`Current: ${modeLabel[currentMode]} — click to switch to ${modeLabel[nextMode[currentMode]].replace(' theme', '')}`}
               aria-label={`Switch to ${nextMode[currentMode].replace('system', 'system theme')}`}
             >
@@ -220,8 +226,50 @@ export function Nav() {
                 <span className="block w-5 h-5" aria-hidden>☀️</span>
               )}
             </button>
+            <button
+              onClick={() => setMobileOpen(!mobileOpen)}
+              className="p-2 text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
+              aria-label={mobileOpen ? 'Close menu' : 'Open menu'}
+              aria-expanded={mobileOpen}
+            >
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                {mobileOpen
+                  ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  : <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7h16M4 12h16M4 17h16" />}
+              </svg>
+            </button>
           </div>
         </div>
+
+        {mobileOpen && (
+          <div className="md:hidden border-t border-gray-200/50 mt-3 pt-2 flex flex-col">
+            {([
+              ['/', '📊 Leaderboard', false],
+              ['/ladder-history', '🕰️ Time Machine', pathname?.startsWith('/ladder-history') ?? false],
+              ['/players', '👥 Players', false],
+              ['/gambling', '🎲 Gambling', onGambling],
+              ['/matches/live', '🔴 Live', pathname?.startsWith('/matches/live') ?? false],
+            ] as const).map(([href, label, active]) => (
+              <Link
+                key={href}
+                href={href}
+                onClick={() => setMobileOpen(false)}
+                className={`px-2 py-3 text-base font-medium rounded-lg ${
+                  active ? 'text-primary bg-gray-100' : 'text-gray-600 hover:bg-gray-100'
+                }`}
+              >
+                {label}
+              </Link>
+            ))}
+            <Link
+              href="/matches/new"
+              onClick={() => setMobileOpen(false)}
+              className="mt-2 py-3 text-center text-base font-semibold bg-primary text-white rounded-lg hover:bg-primary-hover transition-all shadow-sm"
+            >
+              + Record Match
+            </Link>
+          </div>
+        )}
       </div>
     </nav>
   );

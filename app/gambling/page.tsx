@@ -638,6 +638,7 @@ export default function GamblingLobby() {
 
           {/* Ranked table, office style */}
           <div className="bg-card rounded-xl shadow-lg overflow-hidden">
+            <div className="overflow-x-auto">
             <table className="min-w-full">
               <thead>
                 <tr className="bg-gradient-to-r from-amber-500 to-orange-600 border-b border-black/20">
@@ -742,6 +743,7 @@ export default function GamblingLobby() {
                 )}
               </tbody>
             </table>
+            </div>
           </div>
         </section>
       )}

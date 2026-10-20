@@ -645,6 +645,7 @@ export default function LeaderboardClient({
         />
       ) : (
         <div className="bg-card rounded-xl shadow-lg overflow-hidden">
+          <div className="overflow-x-auto">
           <table className="min-w-full">
             <thead>
               <tr className={`bg-gradient-to-r ${effectiveTheme.headerGradient} border-b border-black/20`}>
@@ -768,6 +769,7 @@ export default function LeaderboardClient({
               })}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>
