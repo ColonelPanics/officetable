@@ -8,7 +8,7 @@ import { getBank } from '../lib/bank';
 import { createChallenge, createTeamChallenge, respondToChallenge, settleGambleMatch, correctGambleScore, syncStatuses } from '../lib/gamble';
 import { recalculateAchievementsForGame, deleteAchievementsForMatch } from '../lib/achievements';
 import { getPunditryForMatch } from '../lib/punditry';
-import { validatePointTimeline, parsePointTimeline, computeTimelineStats, MARATHON_MINUTES } from '../lib/timeline';
+import { validatePointTimeline, parsePointTimeline, computeTimelineStats, MARATHON_MINUTES, SPRINT_MAX_MINUTES, RALLY_MINUTES, SLOW_OPEN_MINUTES, ALTERNATION_MIN_POINTS, longestAlternationRun, longestRally } from '../lib/timeline';
 import type { CreateMatchInput } from '../lib/types';
 
 function assert(cond: boolean, label: string): void {
@@ -80,6 +80,18 @@ const teams: CreateMatchInput['teams'] = [
   const good = validatePointTimeline({ start: START, events: null }, teams, [0, 0]);
   assert(!!good.error, 'non-array events rejected');
 }
+
+// ---------------------------------------------------------------------------
+// Pure timeline-achievement helpers
+// ---------------------------------------------------------------------------
+assert(longestAlternationRun([]) === 0, 'alternation run of nothing is 0');
+assert(longestAlternationRun([{ team: 0, at: 1 }]) === 1, 'single event is a run of 1');
+assert(longestAlternationRun([{ team: 0, at: 1 }, { team: 0, at: 2 }, { team: 1, at: 3 }, { team: 0, at: 4 }, { team: 1, at: 5 }]) === 4, 'AABAB alternates for 4');
+assert(longestAlternationRun([{ team: 0, at: 1 }, { team: 1, at: 2 }, { team: 1, at: 3 }, { team: 0, at: 4 }]) === 2, 'double point breaks the run');
+assert(longestRally([]) === null, 'no rally without points');
+assert(longestRally([{ team: 0, at: 10 }, { team: 1, at: 20 }])?.gapMs === 10, 'rally gap is the event gap');
+const rally = longestRally([{ team: 0, at: 30_000 }, { team: 0, at: 40_000 }, { team: 1, at: 310_000 }]);
+assert(rally !== null && rally.gapMs === 270_000 && rally.fromTeam === 0 && rally.toTeam === 1, 'longest rally is the biggest gap with both bracketing sides');
 
 // ---------------------------------------------------------------------------
 // Wire to wire: team 0 scores first, never trails
@@ -432,6 +444,136 @@ const teams: CreateMatchInput['teams'] = [
   );
   void events3;
   assert(!hasAchievement(r3.matchId, 'dying_breath', eIds[1]), 'no dying_breath when flawless was denied earlier');
+}
+
+// ---------------------------------------------------------------------------
+// Sprint / Bookend / Get On With It / To Me To You / Irresistible vs Immovable
+// ---------------------------------------------------------------------------
+{
+  // 2-0 in 2m50s with the opener at 2m10s: sprint + bookend + get_on_with_it
+  const sEvents = [{ team: 0, at: 130_000 }, { team: 0, at: 160_000 }];
+  const rs = processMatch({
+    game_id: gameId,
+    notes: undefined,
+    teams: [{ team: 0, player_ids: [playerIds[0]], score: 2 }, { team: 1, player_ids: [playerIds[1]], score: 0 }],
+    timeline: { start: START, end: '2026-01-15T10:02:50.000Z', events: sEvents },
+  }, new Date(START));
+  assert(hasAchievement(rs.matchId, 'sprint', playerIds[0]), 'sprint for the 2m50s winner');
+  assert(!hasAchievement(rs.matchId, 'marathon', playerIds[0]), 'no marathon under the threshold');
+  assert(hasAchievement(rs.matchId, 'bookend', playerIds[0]), 'bookend: same side scored first AND last');
+  assert(!hasAchievement(rs.matchId, 'bookend', playerIds[1]), 'no bookend for the shut-out side');
+  assert(hasAchievement(rs.matchId, 'get_on_with_it', playerIds[0]), 'get_on_with_it for the 2m10s opener');
+  assert(!hasAchievement(rs.matchId, 'to_me_to_you'), 'no alternation for a shut-out');
+
+  // To Me To You: 5 alternating points, blue takes it 3-2 in 3m20s (no sprint)
+  const altEvents = [1, 0, 1, 0, 1].map((team, i) => ({ team, at: (i + 1) * 40_000 }));
+  const ra = processMatch({
+    game_id: gameId,
+    notes: undefined,
+    teams: [{ team: 0, player_ids: [playerIds[0]], score: 2 }, { team: 1, player_ids: [playerIds[1]], score: 3 }],
+    timeline: { start: START, end: '2026-01-15T10:03:20.000Z', events: altEvents },
+  }, new Date(START));
+  assert(longestAlternationRun(altEvents) === 5, 'alternation run is 5');
+  assert(hasAchievement(ra.matchId, 'to_me_to_you', playerIds[0]) && hasAchievement(ra.matchId, 'to_me_to_you', playerIds[1]), 'to_me_to_you for BOTH sides');
+  assert(!hasAchievement(ra.matchId, 'sprint', playerIds[1]), 'no sprint at 3m20s (over the threshold)');
+  assert(hasAchievement(ra.matchId, 'bookend', playerIds[1]), 'bookend also for the alternating 3-2 winner');
+  assert(!hasAchievement(ra.matchId, 'get_on_with_it'), 'no get_on_with_it for a 40s opener');
+
+  // Irresistible Force vs Immovable Object: 0-0-…-1 with a 4m30s gap mid-match
+  const rr = processMatch({
+    game_id: gameId,
+    notes: undefined,
+    teams: [{ team: 0, player_ids: [playerIds[0]], score: 2 }, { team: 1, player_ids: [playerIds[1]], score: 1 }],
+    timeline: { start: START, end: '2026-01-15T10:05:20.000Z', events: [{ team: 0, at: 30_000 }, { team: 0, at: 40_000 }, { team: 1, at: 310_000 }] },
+  }, new Date(START));
+  assert(hasAchievement(rr.matchId, 'irresistible_force', playerIds[0]) && hasAchievement(rr.matchId, 'irresistible_force', playerIds[1]), 'irresistible_force for BOTH bracketing sides in a 4m30s rally');
+  assert(!hasAchievement(rr.matchId, 'bookend'), 'no bookend when the last point switched sides');
+
+  // Game of Two Halves: best-of 10, blue 5 down and salvaging a 5-5 draw
+  const drawEvents = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1].map((team, i) => ({ team, at: (i + 1) * 30_000 }));
+  const rd = processMatch({
+    game_id: gameId,
+    notes: undefined,
+    teams: [{ team: 0, player_ids: [playerIds[0]], score: 5 }, { team: 1, player_ids: [playerIds[1]], score: 5 }],
+    timeline: { start: START, end: '2026-01-15T10:05:00.000Z', events: drawEvents },
+  }, new Date(START));
+  assert(hasAchievement(rd.matchId, 'game_of_two_halves', playerIds[1]), 'game_of_two_halves for the 5-down side that drew');
+  assert(!hasAchievement(rd.matchId, 'game_of_two_halves', playerIds[0]), 'no game_of_two_halves for the side that was never behind');
+  assert(!hasAchievement(rd.matchId, 'sprint') && !hasAchievement(rd.matchId, 'marathon'), 'no sprint/marathon mid-range draws');
+  assert(!hasAchievement(rd.matchId, 'wire_to_wire'), 'no wire_to_wire inside a 5-5 comeback draw');
+
+  // Recalc keeps the new achievements (they live in the same timeline path)
+  const kept = recalculateAchievementsForGame(gameId);
+  assert(kept.matchesProcessed > 0, 'recalc still runs');
+  void kept;
+}
+
+// ---------------------------------------------------------------------------
+// Switcharoo: only the player who ROSE across the swap earns it (TODO.md)
+// ---------------------------------------------------------------------------
+{
+  // A settled board needs 10+ matches this season: 12 quick warm-ups, then
+  // find an adjacent ladder pair and have the lower one win the decider.
+  const sNames = ['S0', 'S1', 'S2', 'S3', 'S4'].map(n => `Sw-${n}-${Date.now()}`);
+  const sIds = sNames.map(n => (db.prepare('INSERT INTO players (name) VALUES (?)').run(n).lastInsertRowid as number));
+  const twoTeams = (i: number, j: number, scoreI: number, scoreJ: number) => [
+    { team: 0, player_ids: [sIds[i]], score: scoreI },
+    { team: 1, player_ids: [sIds[j]], score: scoreJ },
+  ];
+  // Round-robin 1v1 ×2 so the board settles with distinct Elo gaps
+  for (let round = 0; round < 2; round++) {
+    for (let i = 0; i < sIds.length; i++) {
+      for (let j = i + 1; j < sIds.length; j++) {
+        processMatch({ game_id: gameId, notes: 'switcharoo warm', teams: twoTeams(i, j, 10, round === 0 ? 0 : 5) }, new Date(Date.now() - (13 - i * 12 - j * 2) * 60_000));
+        processMatch({ game_id: gameId, notes: 'switcharoo warm', teams: twoTeams(j, i, 10, round === 0 ? 0 : 5) }, new Date(Date.now() - (13 - i * 12 - j * 2) * 60_000));
+      }
+    }
+    for (let i = 1; i < sIds.length; i++) {
+      processMatch({ game_id: gameId, notes: 'switcharoo warm', teams: twoTeams(i, i - 1, 10, 0) }, new Date(Date.now() - (12 - i * 2) * 60_000));
+    }
+  }
+
+  const board = db.prepare(`
+    SELECT pr.player_id, pr.elo FROM player_ratings pr
+    WHERE pr.game_id = ? AND pr.season_id = (SELECT id FROM seasons WHERE start_date <= date('now') ORDER BY id DESC LIMIT 1)
+    ORDER BY pr.elo DESC
+  `).all(gameId) as { player_id: number; elo: number }[];
+  const idsOnBoard = board.map(r => r.player_id);
+  assert(idsOnBoard.length >= 5, 'switcharoo warm ladder built');
+
+  // Adjacent pair with the smallest gap, mid-board (not #1 – keeps boss_fight out).
+  // Zero/negative gaps (symmetric warm-ups) can't swap — skip them.
+  let lowIdx = -1;
+  let smallest = Infinity;
+  for (let i = 2; i < Math.min(idsOnBoard.length - 2, board.length - 1); i++) {
+    const gap = board[i - 1].elo - board[i].elo;
+    if (gap <= 0) continue;
+    if (gap < smallest) { smallest = gap; lowIdx = i; }
+  }
+  assert(smallest > 0 && lowIdx > 0, 'adjacent mid-board pair with a real gap found');
+  const above = board[lowIdx - 1];
+  const below = board[lowIdx];
+  const beforeRanks = idsOnBoard.indexOf(above.player_id) + 1;
+  assert(beforeRanks === lowIdx, 'sanity: board rank of the above player');
+
+  const sw = processMatch({
+    game_id: gameId,
+    notes: 'switcharoo decider',
+    teams: [
+      { team: 0, player_ids: [above.player_id], score: 0 },
+      { team: 1, player_ids: [below.player_id], score: 10 },
+    ],
+  }, new Date());
+
+  const swRows = db.prepare(`
+    SELECT pa.player_id, pa.metadata FROM player_achievements pa
+    JOIN achievements a ON pa.achievement_id = a.id
+    WHERE pa.match_id = ? AND a.name = 'switcharoo'
+  `).all(sw.matchId) as { player_id: number; metadata: string }[];
+  assert(swRows.length === 1, `only ONE switcharoo row (got ${swRows.length})`);
+  assert(swRows.length === 1 && swRows[0].player_id === below.player_id, 'switcharoo goes to the player who ROSE');
+  const meta = JSON.parse(swRows[0]?.metadata ?? '{}') as { rank_before: number; rank_after: number };
+  assert(meta.rank_after < meta.rank_before, 'metadata shows the climb');
 }
 
 console.log(process.exitCode ? 'SMOKE FAILED' : 'LIVE SMOKE OK');

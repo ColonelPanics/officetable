@@ -69,6 +69,45 @@ const MAX_MS = 24 * 60 * 60 * 1000;
  *  at least this long is a marathon (shared so the achievement and punditry
  *  vocabulary stay in sync). */
 export const MARATHON_MINUTES = 15;
+/** Sprint achievement: a WIN in a live-tracked match lasting less than this. */
+export const SPRINT_MAX_MINUTES = 3;
+/** Irresistible-vs-immovable: consecutive points this far apart are a rally. */
+export const RALLY_MINUTES = 4;
+/** Get-on-with-it: the opening point of a live-tracked match landed after
+ *  this long. */
+export const SLOW_OPEN_MINUTES = 2;
+/** To-me-to-you: alternate scorers for at least this many consecutive points. */
+export const ALTERNATION_MIN_POINTS = 4;
+
+/** Longest run of alternating scorers — consecutive events whose team differs
+ *  from both the previous (for 2 teams this is strict alternation; for team
+ *  games, a run where no team scores twice in a row within it). */
+export function longestAlternationRun(events: PointTimelineEvent[]): number {
+  let best = 0;
+  let run = 0;
+  let prev: number | undefined;
+  for (const ev of events) {
+    if (ev.team === prev) run = 1;
+    else { run++; if (run > best) best = run; }
+    prev = ev.team;
+  }
+  return best;
+}
+
+/** The longest “rally”: the largest gap between two consecutive scored
+ *  points, with the bracketing events identifying who was involved.
+ *  Null when fewer than 2 points were scored. */
+export function longestRally(events: PointTimelineEvent[]):
+  { fromTeam: number; toTeam: number; gapMs: number } | null {
+  let best: { fromTeam: number; toTeam: number; gapMs: number } | null = null;
+  for (let i = 1; i < events.length; i++) {
+    const gapMs = events[i].at - events[i - 1].at;
+    if (best === null || gapMs > best.gapMs) {
+      best = { fromTeam: events[i - 1].team, toTeam: events[i].team, gapMs };
+    }
+  }
+  return best;
+}
 
 /**
  * Validate + normalise a raw (untrusted JSON) timeline for a match being

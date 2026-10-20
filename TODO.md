@@ -1,0 +1,66 @@
+- [x] scores for games and weighting skill change based on the skill
+- [x] testing of inputs
+- [x] match and skill history
+- [x] determine win/loss/tie based off of scores (require scores)
+- [x] support for draws/tie games 
+- [x] achievements
+- [x] achievements rank only the visible ladder (retired + inactive players excluded from board-position checks), recalculated against each match's own point in history
+- [x] the_best / the_worst / boss_fight require 10+ matches in the season board before they can fire
+- [x] achievement earned dates = the match's timestamp (not the calculation run)
+- [x] achievement payouts (5 moose bucks from the table's pot per achievement, only while the pot has cash)
+- [x] "ladder time machine" — select any point on a sport's match timeline and see the ladder reconstructed exactly as it stood then (lib/ladderHistory + /ladder-history)
+- [x] method to recalculate skill levels // handle modifying match history
+- [x] import of data
+- [x] player overview pages per game (games played, points scored when Team 1, points scored when Team 2, team side preference, wins/draws/losses, points for, points against, point ratio)
+- [x] player records
+- [x] global game overviews (games played, points scored by Team 1, points scored by Team 2, active players)
+- [x] global game records and who holds them (highest skill, lowest skill, longest win streak, longest lose streak, longest unbeaten streak)
+- [x] seasons
+- [ ] tournaments
+- [x] game validation (best of X, first to Y?) 
+- [x] retiring players (not available for selection in new match recording)
+- [x] hiding inactive players from leaderboards (more than 60 days w/o playing)
+- [x] prediction / speculation
+- [ ] advanced game validation (for first_to enforce a win_margin)
+- [x] notifications of games played 
+- [ ] apply some sort of skill degrading for inactive players returning so it's in their favour (perhaps it's just some wiggle to "assumed Elo" based on days since last match for each player with a cap on how much it wiggles)
+- [x] more detail on player records (when they created those runs) 
+- [x] show rank change and notes in notifs
+- [x] team games be the _sum_ of Elo instead of the average?
+- [~] team stats (and option to label player combos with a team name) 
+- [x] match commentary (milestones, streak changes, etc)
+- [ ] timed events (once per day, within office hours, pick a game type and launch an "event" whereby any matches played in that time period have some sort of modifier -> double skill gain, half skill loss, achievement boost (+0.5 Elo per achievement gained), bounty hunter (pick an active player and they are a "target", can't refuse games, first to defeat them gets a +3 Elo boost), ultimate survivor (play at least 3 matches and go unbeaten to earn a bonus), handicap (for the duration calculate some sort of handicap based on score ratio that's applied to match result calculation to favour lower skilled players), doubles (bonus Elo for competing in a doubles match))
+- [x] include team-mate in player profile history view
+- [x] theming / branding
+- [x] pagination & filtering for match history (date range, players involved, scores for each team, number of players?)
+- [x] performance improvements because the leaderboard page takes ages to load
+- [ ] "Versus" graphics on match details and match record page
+- [x] "Versus" head-to-head page (think like competitive graphic, show some key stats down the middle with a big picture of each player on each side of the stats) 
+- [ ] show current streak
+- [ ] better punditry styling
+- [ ] punditry into "match report", could this be done without AI?
+- [x] head-to-head table and breakdown
+- [x] profile pics
+- [x] reinstate retire button
+- [x] "player since" should reflect what's earliest of player creation date or first match date
+- [ ] "stakes" for matches (outside of ladder players can agree some stake/gamble criteria that effects the skill swing or the result)
+- [ ] game modifiers/modes (e.g. 2 balls in at a time for foosball), tracking of them against match entries and perhaps a companion feature to push people to play modified matches
+- [x] achievement progress per game type (showing what is unlocked, progress through achievements, what's left to unlock)
+- [ ] rules / arbitrary game type descriptions section
+- [x] don't count inactive in rank shift
+- [x] Seasonal theming (e.g. spooky in October, festive in December)
+- [x] Include 'special rules' in gamble notifs
+- [x] Add confirmation to "record and settle match" in gamble interface ("is RED PLAYER X-Y BLUE PLAYER the correct score?")
+- [x] Make players' returns clearer on the match history (the working is shown but not the result, give red/green of what their payout was against their entry fee) 
+- [x] Support gamble challenges of more than 1v1 (2v2s, unfair matches like 1v2 etc) — and recording attaches any team shape: the record-and-attach hook matches roster seat SETS (either side order), so team gambles record/attach through the same leaderboard + live-scorer interfaces as 1v1s (settle records the full roster). Live-tracked team gambles keep their point timeline.
+- [x] Guards for cancelling a gamble and refunding everyone ("Are you really really sure?") 
+- [x] migrate the bookie mirror to the bank's new service-pot endpoints (POST /services/transaction, win/loss legs, pot balance via GET /services/{name}; old house↔player transfers gone)
+- [x] house user retired: the service pot IS the house (the site no longer registers/maintains 'officetablehouse' on the bank; ALCES_HOUSE_USER/ALCES_HOUSE_PASSWORD are obsolete; pot truth = GET /services/{name} balance alone)
+- [x] stake legs now mirror as bank 'hold's (refundable commitments); when they resolve the bank's ledger gets the manager's dance — 'return' (release the hold) then a real 'win' (profit) or 'loss' (stake) leg; refunds of unspent commitments are just 'return's; the mirror is fire-and-forget (no delivery verification — the bank-truth resync keeps the projections honest)
+- [ ] Fix unbeaten run on display of profile, clearly wrong (e.g. Oscar has unbeaten record of 1 yet somehow a 6 game win streak)
+- [x] "Live score" option: shipped — see LIVE_SCORES.md. Interactive live scorer at /matches/live records the ordered points (with undo / per-point removal) + an estimated duration, persisted client-side between refreshes and stored on the match as matches.points_timeline. Timeline achievements (wire_to_wire 🛡️, comeback_kid 🔄, marathon ⏱️), timeline punditry (comebacks, lead changes, blitz/marathon pace) and match-report summaries (duration badges, score-over-time chart, scoring order) are all built on lib/timeline.ts.
+- [x] achievements from live game state: wire_to_wire, comeback_kid and marathon are live; future candidates: fastest 3-point burst, never tied after the first point, momentum swings.
+- [ ] Make app look good on mobile
+- [x] Possibility to do live tracking for gambling matches (perhaps gambling records is now just marking that a "record match" as "resolves Bet #15" or whatever? That way there's only ever the live and non-live match entries without the third gambling-specific entry point)
+- [ ] Threaded gchat notifications for live games posting when goals go in? (so not to spam too much, essentially a "match started!" tiny message with all goals in thread, could be like live comms)
+- [x] Fix switcharoo achievement (only give to the one who went up rank -> see Gary vs Oscar 2026-10-20 which awarded to both of them) — fixed: only the climber earns it

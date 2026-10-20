@@ -17,6 +17,12 @@ final-score-only record can't provide.
   | Marathon | ⏱️ | Won a live-tracked match lasting **15 minutes or more** (`MARATHON_MINUTES` in lib/timeline.ts — punditry shares it) |
   | Dying Breath | 🫀 | The loser's ONLY point was the very last point of the game — a flawless win denied at the death |
   | Opener | 🎺 | Scored the first point in **3 live-tracked games in a row** (un-tracked games count against the run) |
+  | Sprint | 🏃 | Won a live-tracked match in **under 3 minutes** (`SPRINT_MAX_MINUTES` — the anti-marathon) |
+  | Bookend | 🔖 | The same side scored **both the first and the last point** |
+  | Get On With It | 🐌 | The opening point landed **more than 2 minutes in** (`SLOW_OPEN_MINUTES`) |
+  | To Me, To You | 🏓 | Scorers alternated for **4+ consecutive points** (`ALTERNATION_MIN_POINTS`) — both sides earn |
+  | Irresistible Force vs Immovable Object | 🗿 | More than **4 minutes between two consecutive points** (`RALLY_MINUTES`) — both bracketing sides earn |
+  | Game of Two Halves | 🌗 | Best-of games only: trailed by **half the best-of score** and salvaged a **draw** live |
 - **Live punditry** on the match report: comeback / wire-to-wire stories,
   lead-change counts (ties ignored), marathon and blitz-pace notes.
 - **Match summary/report rendering** like any sports report: the match detail

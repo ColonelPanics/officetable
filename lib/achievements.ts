@@ -1,7 +1,7 @@
 import db from './db';
 import { resolveSeason, toDbDate } from './seasons';
 import { getBank } from './bank';
-import { computeTimelineStats, parsePointTimeline, MARATHON_MINUTES, type PointTimeline } from './timeline';
+import { computeTimelineStats, parsePointTimeline, MARATHON_MINUTES, SPRINT_MAX_MINUTES, RALLY_MINUTES, SLOW_OPEN_MINUTES, ALTERNATION_MIN_POINTS, longestAlternationRun, longestRally, type PointTimeline } from './timeline';
 
 export interface AchievementContext {
   matchId: number;
@@ -502,8 +502,9 @@ export function checkAchievements(context: AchievementContext): AchievementResul
 
     // Switcharoo: Two opponents leave the match having swapped ladder
     // positions — whoever sat above now sits below the other. Draws count:
-    // a shared point haul can still reorder the board. Both swappers earn
-    // it (they did it to each other).
+    // a shared point haul can still reorder the board. Only the player who
+    // ROSE across the swap earns it (the one who fell just ran into it —
+    // see TODO.md: the climb is the feat, the drop isn't an achievement).
     for (let i = 0; i < participants.length; i++) {
       for (let j = i + 1; j < participants.length; j++) {
         const a = participants[i];
@@ -525,26 +526,30 @@ export function checkAchievements(context: AchievementContext): AchievementResul
           (bBefore < aBefore && bAfter > aAfter);
 
         if (swapped) {
-          results.push({
-            achievementName: 'switcharoo',
-            playerId: a.player_id,
-            matchId,
-            metadata: {
-              with_opponent: playerNameMap.get(b.player_id),
-              rank_before: aBefore,
-              rank_after: aAfter
-            }
-          });
-          results.push({
-            achievementName: 'switcharoo',
-            playerId: b.player_id,
-            matchId,
-            metadata: {
-              with_opponent: playerNameMap.get(a.player_id),
-              rank_before: bBefore,
-              rank_after: bAfter
-            }
-          });
+          if (aAfter < aBefore) {
+            results.push({
+              achievementName: 'switcharoo',
+              playerId: a.player_id,
+              matchId,
+              metadata: {
+                with_opponent: playerNameMap.get(b.player_id),
+                rank_before: aBefore,
+                rank_after: aAfter
+              }
+            });
+          }
+          if (bAfter < bBefore) {
+            results.push({
+              achievementName: 'switcharoo',
+              playerId: b.player_id,
+              matchId,
+              metadata: {
+                with_opponent: playerNameMap.get(a.player_id),
+                rank_before: bBefore,
+                rank_after: bAfter
+              }
+            });
+          }
         }
       }
     }
@@ -1164,6 +1169,99 @@ export function checkAchievements(context: AchievementContext): AchievementResul
           playerId: p.player_id,
           matchId,
           metadata: { streak: 3 }
+        });
+      }
+    }
+
+    // Sprint: winning a live-tracked match in under SPRINT_MAX_MINUTES —
+    // the anti-marathon. Needs the clock, so recorded-finally matches skip.
+    if (!isDraw && durationMin !== null && durationMin < SPRINT_MAX_MINUTES) {
+      for (const winnerId of winnerIds) {
+        results.push({
+          achievementName: 'sprint',
+          playerId: winnerId,
+          matchId,
+          metadata: { duration_seconds: Math.round(stats.durationMs! / 1000), points: stats.pointCount }
+        });
+      }
+    }
+
+    // Bookend: the same side scored BOTH the first and the last point of the
+    // match — owned it start to finish. Whole side earns (team seats share it).
+    const lastEventTeam = context.timeline.events[context.timeline.events.length - 1].team;
+    if (stats.firstScorer !== null && lastEventTeam === stats.firstScorer) {
+      for (const playerId of teams[stats.firstScorer]?.player_ids ?? []) {
+        results.push({
+          achievementName: 'bookend',
+          playerId,
+          matchId,
+          metadata: { points: stats.pointCount }
+        });
+      }
+    }
+
+    // Get On With It: the OPENING point only landed after
+    // SLOW_OPEN_MINUTES — a stalled start, but somebody eventually got on
+    // with it. The first scorers earn it.
+    if (stats.firstScorer !== null && context.timeline.events[0].at > SLOW_OPEN_MINUTES * 60_000) {
+      for (const playerId of teams[stats.firstScorer]?.player_ids ?? []) {
+        results.push({
+          achievementName: 'get_on_with_it',
+          playerId,
+          matchId,
+          metadata: { at_seconds: Math.round(context.timeline.events[0].at / 1000) }
+        });
+      }
+    }
+
+    // To Me, To You: alternating scorers for ALTERNATION_MIN_POINTS or more
+    // consecutive points — the whole match (all participants) relives the
+    // rally together. Both sides earn.
+    const alternationRun = longestAlternationRun(context.timeline.events);
+    if (alternationRun >= ALTERNATION_MIN_POINTS) {
+      for (const p of participants) {
+        results.push({
+          achievementName: 'to_me_to_you',
+          playerId: p.player_id,
+          matchId,
+          metadata: { run: alternationRun }
+        });
+      }
+    }
+
+    // Irresistible Force vs Immovable Object: more than RALLY_MINUTES
+    // between two consecutive points — both bracketing sides earn (that's
+    // one long pointless stand-off, for both of them).
+    const rally = longestRally(context.timeline.events);
+    if (rally !== null && rally.gapMs > RALLY_MINUTES * 60_000) {
+      for (const teamIndex of [rally.fromTeam, rally.toTeam]) {
+        for (const playerId of teams[teamIndex]?.player_ids ?? []) {
+          results.push({
+            achievementName: 'irresistible_force',
+            playerId,
+            matchId,
+            metadata: { gap_seconds: Math.round(rally.gapMs / 1000) }
+          });
+        }
+      }
+    }
+  }
+
+  // Game of Two Halves: live-tracked, best-of games only — a side trailed
+  // by 50% of the best-of score and salvaged a DRAW at the end.
+  if (context.timeline && context.timeline.events.length > 0 && isBestOf && isDraw
+      && (game?.score_value ?? 0) > 0) {
+    const stats = computeTimelineStats(context.timeline, teams.map(t => t.score));
+    const halfScore = game!.score_value / 2;
+    for (let teamIndex = 0; teamIndex < teams.length; teamIndex++) {
+      const teamStats = stats.teams[teamIndex];
+      if (!teamStats || teamStats.maxDeficit < halfScore) continue;
+      for (const playerId of teams[teamIndex].player_ids) {
+        results.push({
+          achievementName: 'game_of_two_halves',
+          playerId,
+          matchId,
+          metadata: { max_deficit: teamStats.maxDeficit, score: teams.map(t => t.score).join('-') }
         });
       }
     }

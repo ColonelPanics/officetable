@@ -310,7 +310,13 @@ const seedAchievements = db.prepare(`
     ('comeback_kid', 'Trail by 2 or more points and still win a live-tracked match', 'special', '🔄'),
     ('marathon', 'Win a live-tracked match that lasted 15 minutes or more', 'special', '⏱️'),
     ('dying_breath', 'Prevent a flawless win by scoring your only point on the last point of the game', 'special', '🫀'),
-    ('opener', 'Score the first point in 3 live-tracked games in a row', 'streak', '🎺')
+    ('opener', 'Score the first point in 3 live-tracked games in a row', 'streak', '🎺'),
+    ('sprint', 'Win a live-tracked match in under 3 minutes', 'special', '🏃'),
+    ('bookend', 'Score the first and the last points of a live-tracked match', 'special', '🔖'),
+    ('to_me_to_you', 'Alternate scorers for at least 4 consecutive points in a live-tracked match', 'special', '🏓'),
+    ('get_on_with_it', 'Score the opening point more than 2 minutes into a live-tracked match', 'special', '🐌'),
+    ('irresistible_force', 'Go more than 4 minutes between two points in a live-tracked match', 'special', '🗿'),
+    ('game_of_two_halves', 'Trail by half the best-of score and come back to draw it live', 'special', '🌗')
 `);
 seedAchievements.run();
 
@@ -525,6 +531,12 @@ const updateAchievementIcons = db.prepare(`
     WHEN 'marathon' THEN '⏱️'
     WHEN 'dying_breath' THEN '🫀'
     WHEN 'opener' THEN '🎺'
+    WHEN 'sprint' THEN '🏃'
+    WHEN 'bookend' THEN '🔖'
+    WHEN 'to_me_to_you' THEN '🏓'
+    WHEN 'get_on_with_it' THEN '🐌'
+    WHEN 'irresistible_force' THEN '🗿'
+    WHEN 'game_of_two_halves' THEN '🌗'
     ELSE icon
   END
   WHERE icon IS NULL OR icon = ''
