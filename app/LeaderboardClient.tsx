@@ -340,8 +340,9 @@ export default function LeaderboardClient({
         </div>
       )}
 
-      <div className="flex items-center justify-between mb-8">
-        <div className="flex items-center gap-4">
+      {/* Wraps on phones — season picker + action row otherwise overflow */}
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-8">
+        <div className="flex flex-wrap items-center gap-3 min-w-0">
           <h1 className="text-3xl font-bold">
             {effectiveTheme.titleEmoji ? `${effectiveTheme.titleEmoji} ` : ''}
             Leaderboard
@@ -387,22 +388,22 @@ export default function LeaderboardClient({
             <option value="alltime">🏆 All Time</option>
           </select>
         </div>
-        <div className="flex gap-3">
+        <div className="flex flex-wrap gap-2 sm:gap-3">
           <Link
             href="/matches"
-            className="bg-gray-200 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-300 transition-colors"
+            className="bg-gray-200 text-gray-800 text-sm px-4 py-2 rounded-lg hover:bg-gray-300 transition-colors"
           >
             Match History
           </Link>
           <Link
             href={selectedGameId ? `/matches/new?game=${selectedGameId}` : "/matches/new"}
-            className="bg-primary text-white px-4 py-2 rounded-lg hover:bg-primary-hover transition-colors"
+            className="bg-primary text-white text-sm px-4 py-2 rounded-lg hover:bg-primary-hover transition-colors"
           >
             Record Match
           </Link>
           <Link
             href="/settings"
-            className="bg-gray-200 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-300 transition-colors"
+            className="bg-gray-200 text-gray-800 text-sm px-4 py-2 rounded-lg hover:bg-gray-300 transition-colors"
           >
             Settings
           </Link>

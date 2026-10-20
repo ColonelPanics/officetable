@@ -351,9 +351,10 @@ function MatchesPageContent() {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-8">
+      {/* Wraps on phones — season picker + action row otherwise overflow */}
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-8">
         <h1 className="text-3xl font-bold">Match History</h1>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
           {/* Season scope: Elo swings per match are ledger-specific */}
           <select
             value={seasonView === 'current' ? `current:${currentSeasonId}` : String(seasonView)}
@@ -379,7 +380,7 @@ function MatchesPageContent() {
           </select>
           <Link
           href={selectedGameId ? `/matches/new?game=${selectedGameId}` : "/matches/new"}
-          className="bg-primary text-white px-4 py-2 rounded-lg hover:bg-primary-hover transition-all shadow-sm hover:shadow-md font-medium"
+          className="bg-primary text-white text-sm px-4 py-2 rounded-lg hover:bg-primary-hover transition-all shadow-sm hover:shadow-md font-medium"
         >
           + Record Match
         </Link>
