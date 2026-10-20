@@ -279,7 +279,18 @@ function LiveMatchContent() {
           ],
           timeline: {
             start: startedAt,
-            end: finishedAt,
+            // Resume/back-to-scoring time after the last point isn't match
+            // time — clamp end to the last scored point when it ran long, so
+            // the review/login detour can't inflate duration (or award
+            // Marathon, a 15+ minute paid achievement) on a resumed draft.
+            end: (() => {
+              const lastAt = events.length ? events[events.length - 1].at : null;
+              if (!finishedAt || lastAt === null) return finishedAt;
+              const trueEndMs = new Date(startedAt!).getTime() + lastAt;
+              return new Date(finishedAt).getTime() - trueEndMs > 2 * 60_000
+                ? new Date(trueEndMs).toISOString()
+                : finishedAt;
+            })(),
             events,
           },
         }),
