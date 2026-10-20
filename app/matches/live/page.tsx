@@ -222,19 +222,36 @@ function LiveMatchContent() {
   const score1 = useMemo(() => events.filter(e => e.team === 0).length, [events]);
   const score2 = useMemo(() => events.filter(e => e.team === 1).length, [events]);
 
+  // The match is over at the last scored point: once the score target is
+  // reached, everything (clock, live stats, submitted timeline) uses this end
+  // — resuming/re-entering review can't inflate runtime into paid-achievement
+  // territory (Marathon ⏱ pays on 15+ minutes). End match pressed within
+  // 2 minutes of the last point still wins (it's the natural match end);
+  // a gap larger than that is a detour (review, login, resume) — clamp to
+  // the last point instead.
+  const endedAt = useMemo(() => {
+    if (!startedAt) return null;
+    const target = selectedGameData?.score_value ?? Infinity;
+    if (score1 + score2 < target || events.length === 0) return null; // still live
+    const lastAt = events[events.length - 1].at;
+    const trueEndMs = new Date(startedAt).getTime() + Math.max(0, lastAt);
+    if (finishedAt && new Date(finishedAt).getTime() - trueEndMs <= 2 * 60_000) return finishedAt;
+    return new Date(trueEndMs).toISOString();
+  }, [startedAt, finishedAt, events, score1, score2, selectedGameData]);
+
   const liveStats = useMemo(() => {
     if (!startedAt) return null;
-    const timeline: PointTimeline = { start: startedAt, end: finishedAt, events };
+    const timeline: PointTimeline = { start: startedAt, end: endedAt, events };
     return computeTimelineStats(timeline, [score1, score2]);
-  }, [startedAt, finishedAt, events, score1, score2]);
+  }, [startedAt, endedAt, events, score1, score2]);
 
   // `tick` is a dependency on purpose: it forces the clock to recompute
   // (and the header to re-render) once a second while the match is live.
   const elapsedMs = useMemo(() => {
     if (!startedAt) return 0;
-    const end = finishedAt ? new Date(finishedAt).getTime() : Date.now();
+    const end = endedAt ? new Date(endedAt).getTime() : Date.now();
     return end - new Date(startedAt).getTime();
-  }, [startedAt, finishedAt, tick]);
+  }, [startedAt, endedAt, tick]);
 
   const availablePlayers = players.filter(
     (p) => !team1Players.includes(p.id) && !team2Players.includes(p.id)
@@ -279,18 +296,7 @@ function LiveMatchContent() {
           ],
           timeline: {
             start: startedAt,
-            // Resume/back-to-scoring time after the last point isn't match
-            // time — clamp end to the last scored point when it ran long, so
-            // the review/login detour can't inflate duration (or award
-            // Marathon, a 15+ minute paid achievement) on a resumed draft.
-            end: (() => {
-              const lastAt = events.length ? events[events.length - 1].at : null;
-              if (!finishedAt || lastAt === null) return finishedAt;
-              const trueEndMs = new Date(startedAt!).getTime() + lastAt;
-              return new Date(finishedAt).getTime() - trueEndMs > 2 * 60_000
-                ? new Date(trueEndMs).toISOString()
-                : finishedAt;
-            })(),
+            end: endedAt, // clamped to the last point — see `endedAt`
             events,
           },
         }),
