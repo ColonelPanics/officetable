@@ -168,26 +168,30 @@ export async function GET(request: NextRequest) {
     let longestLoseStreakEnd = 0;
     let longestUnbeatenStreakStart = 0;
     let longestUnbeatenStreakEnd = 0;
+    /** Result letters in play order (W/L/D) — also feeds the current streak. */
+    const resultLetters: string[] = [];
 
     for (let i = 0; i < matchResults.length; i++) {
       const match = matchResults[i];
-      if (match.score > match.opponent_score) {
+      const result = match.score > match.opponent_score ? 'W'
+        : match.score < match.opponent_score ? 'L' : 'D';
+      resultLetters.push(result);
+
+      if (result === 'W') {
         // Win
         if (currentWinStreak === 0) winStreakStart = i;
         currentWinStreak++;
         currentLoseStreak = 0;
-        currentUnbeatenStreak++;
         if (currentWinStreak > longestWinStreak) {
           longestWinStreak = currentWinStreak;
           longestWinStreakStart = winStreakStart;
           longestWinStreakEnd = i;
         }
-      } else if (match.score < match.opponent_score) {
+      } else if (result === 'L') {
         // Loss
         if (currentLoseStreak === 0) loseStreakStart = i;
         currentWinStreak = 0;
         currentLoseStreak++;
-        currentUnbeatenStreak = 0;
         if (currentLoseStreak > longestLoseStreak) {
           longestLoseStreak = currentLoseStreak;
           longestLoseStreakStart = loseStreakStart;
@@ -195,9 +199,17 @@ export async function GET(request: NextRequest) {
         }
       } else {
         // Draw
-        if (currentUnbeatenStreak === 0) unbeatenStreakStart = i;
         currentWinStreak = 0;
         currentLoseStreak = 0;
+      }
+
+      // Unbeaten: every non-loss extends the run, a loss resets it. The
+      // record used to only ADVANCE on draws — a long WIN streak left the
+      // unbeaten record untouched (Oscar's 6-win streak showed 1).
+      if (result === 'L') {
+        currentUnbeatenStreak = 0;
+      } else {
+        if (currentUnbeatenStreak === 0) unbeatenStreakStart = i;
         currentUnbeatenStreak++;
         if (currentUnbeatenStreak > longestUnbeatenStreak) {
           longestUnbeatenStreak = currentUnbeatenStreak;
@@ -205,6 +217,19 @@ export async function GET(request: NextRequest) {
           longestUnbeatenStreakEnd = i;
         }
       }
+    }
+
+    // Current streak — the house 'W5'/'L2'/'D1' convention (same as
+    // head-to-head): the last match's result and how many of it in a row.
+    let currentStreak = '';
+    if (resultLetters.length > 0) {
+      const last = resultLetters[resultLetters.length - 1];
+      let count = 1;
+      for (let i = resultLetters.length - 2; i >= 0; i--) {
+        if (resultLetters[i] !== last) break;
+        count++;
+      }
+      currentStreak = `${last}${count}`;
     }
 
     // Find when highest and lowest Elo occurred
@@ -387,6 +412,7 @@ export async function GET(request: NextRequest) {
       score_value: game.score_value,
       elo: currentElo,
       ...stats,
+      current_streak: currentStreak,
       records: {
         highest_elo: highestElo,
         highest_elo_date: highestEloDate,

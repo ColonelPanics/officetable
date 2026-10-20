@@ -83,6 +83,8 @@ interface GameStat {
   points_conceded: number;
   records: GameRecords;
   elo_history: EloHistoryPoint[];
+  /** Current streak in the house 'W5'/'L2'/'D1' form ('' = no matches yet). */
+  current_streak: string;
   achievements: Achievement[];
 }
 

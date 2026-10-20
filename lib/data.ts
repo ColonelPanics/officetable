@@ -499,7 +499,6 @@ export function getGameRecords(gameId: number, options: GameRecordsOptions = {})
         if (currentWinStreak === 0) winStreakStart = match.played_at;
         currentWinStreak++;
         currentLoseStreak = 0;
-        currentUnbeatenStreak++;
         if (currentWinStreak > (longestWinStreak?.streak || 0)) {
           longestWinStreak = {
             player_id,
@@ -513,7 +512,6 @@ export function getGameRecords(gameId: number, options: GameRecordsOptions = {})
         if (currentLoseStreak === 0) loseStreakStart = match.played_at;
         currentWinStreak = 0;
         currentLoseStreak++;
-        currentUnbeatenStreak = 0;
         if (currentLoseStreak > (longestLoseStreak?.streak || 0)) {
           longestLoseStreak = {
             player_id,
@@ -524,9 +522,16 @@ export function getGameRecords(gameId: number, options: GameRecordsOptions = {})
           };
         }
       } else {
-        if (currentUnbeatenStreak === 0) unbeatenStreakStart = match.played_at;
         currentWinStreak = 0;
         currentLoseStreak = 0;
+      }
+
+      // Unbeaten (wins + draws, broken only by a loss) — counts EVERY
+      // non-loss, not just draws: the record used to only advance on draws,
+      // so a long WIN streak showed no unbeaten record at all (Oscar, 2026-10).
+      if (isLoss) currentUnbeatenStreak = 0;
+      else {
+        if (currentUnbeatenStreak === 0) unbeatenStreakStart = match.played_at;
         currentUnbeatenStreak++;
         if (currentUnbeatenStreak > (longestUnbeatenStreak?.streak || 0)) {
           longestUnbeatenStreak = {

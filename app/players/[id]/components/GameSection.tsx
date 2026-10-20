@@ -115,6 +115,8 @@ interface GameSectionProps {
     points_conceded: number;
     records: GameRecords;
     elo_history: EloHistoryPoint[];
+    /** Current streak in the house 'W5'/'L2'/'D1' form ('' = no matches). */
+    current_streak: string;
     achievements: Achievement[];
   };
   playerId: number;
@@ -237,7 +239,22 @@ export function GameSection({
           <span className="text-lg">🏆</span>
           <span className="text-sm font-semibold text-gray-700 uppercase tracking-wide">Records</span>
         </div>
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          {/* Current form — the streak as of RIGHT NOW (W5/L2/D1, house convention) */}
+          <div className="bg-card rounded-xl p-3 shadow-sm">
+            <div className="text-xs text-gray-500 mb-1">Current Form</div>
+            <div className={`font-bold text-lg ${
+              game.current_streak?.startsWith('W') ? 'text-green-700' :
+              game.current_streak?.startsWith('L') ? 'text-red-700' :
+              game.current_streak?.startsWith('D') ? 'text-blue-700' : 'text-gray-400'
+            }`}>
+              {game.current_streak?.startsWith('W') ? '🔥 ' :
+               game.current_streak?.startsWith('L') ? '❄️ ' :
+               game.current_streak?.startsWith('D') ? '🤝 ' : ''}
+              {game.current_streak || '—'}
+            </div>
+            <div className="text-xs text-gray-400">streaks end with a result change</div>
+          </div>
           <div className="bg-card rounded-xl p-3 shadow-sm">
             <div className="text-xs text-gray-500 mb-1">Peak Rating</div>
             <div className="font-bold font-mono text-green-700 text-lg">{game.records.highest_elo.toFixed(3)}</div>

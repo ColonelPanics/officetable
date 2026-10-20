@@ -36,7 +36,7 @@
 - [x] performance improvements because the leaderboard page takes ages to load
 - [ ] "Versus" graphics on match details and match record page
 - [x] "Versus" head-to-head page (think like competitive graphic, show some key stats down the middle with a big picture of each player on each side of the stats) 
-- [ ] show current streak
+- [x] show current streak — player profile per-game stats show a "Current Form" tile (house W*5*/L*2*/D*1* convention, same as head-to-head rows)
 - [ ] better punditry styling
 - [ ] punditry into "match report", could this be done without AI?
 - [x] head-to-head table and breakdown
@@ -57,7 +57,7 @@
 - [x] migrate the bookie mirror to the bank's new service-pot endpoints (POST /services/transaction, win/loss legs, pot balance via GET /services/{name}; old house↔player transfers gone)
 - [x] house user retired: the service pot IS the house (the site no longer registers/maintains 'officetablehouse' on the bank; ALCES_HOUSE_USER/ALCES_HOUSE_PASSWORD are obsolete; pot truth = GET /services/{name} balance alone)
 - [x] stake legs now mirror as bank 'hold's (refundable commitments); when they resolve the bank's ledger gets the manager's dance — 'return' (release the hold) then a real 'win' (profit) or 'loss' (stake) leg; refunds of unspent commitments are just 'return's; the mirror is fire-and-forget (no delivery verification — the bank-truth resync keeps the projections honest)
-- [ ] Fix unbeaten run on display of profile, clearly wrong (e.g. Oscar has unbeaten record of 1 yet somehow a 6 game win streak)
+- [x] Fix unbeaten run on display of profile, clearly wrong (e.g. Oscar has unbeaten record of 1 yet somehow a 6 game win streak) — fixed: the record only advanced on draws; now every non-loss (wins + draws) extends the unbeaten run (app/api/player-stats + lib/data.ts global records sweep)
 - [x] "Live score" option: shipped — see LIVE_SCORES.md. Interactive live scorer at /matches/live records the ordered points (with undo / per-point removal) + an estimated duration, persisted client-side between refreshes and stored on the match as matches.points_timeline. Timeline achievements (wire_to_wire 🛡️, comeback_kid 🔄, marathon ⏱️), timeline punditry (comebacks, lead changes, blitz/marathon pace) and match-report summaries (duration badges, score-over-time chart, scoring order) are all built on lib/timeline.ts.
 - [x] achievements from live game state: wire_to_wire, comeback_kid and marathon are live; future candidates: fastest 3-point burst, never tied after the first point, momentum swings.
 - [ ] Make app look good on mobile
@@ -65,3 +65,4 @@
 - [ ] Threaded gchat notifications for live games posting when goals go in? (so not to spam too much, essentially a "match started!" tiny message with all goals in thread, could be like live comms)
 - [x] Fix switcharoo achievement (only give to the one who went up rank -> see Gary vs Oscar 2026-10-20 which awarded to both of them) — fixed: only the climber earns it
 - [x] If a player doesn't have a linked gambling account do not try to pay out to them and don't consider it money going out of the officetable pot — fixed: achievement payouts skip unlinked earners entirely (no pot debit), legs are never queued for unlinked players, and already-queued jobs whose player has no linked account are dropped by the drain (done + note) instead of failing and jamming the queue head (scripts/bank-sync-smoke.ts)
+- [ ] Achievements in match history filter list (will then enable player profile clicking on achievement will take them to match history filtered for every game they got that achievement)
