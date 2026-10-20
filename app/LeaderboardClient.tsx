@@ -428,16 +428,16 @@ export default function LeaderboardClient({
               <div className="text-xs text-white/80 mt-1">{gameStats.total_players} total</div>
             )}
           </div>
-          <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl p-5 text-white shadow-lg">
+          <div className="bg-gradient-to-br from-red-500 to-red-600 rounded-xl p-5 text-white shadow-lg">
             <div className="flex items-center gap-2 mb-2">
-              <span className="text-2xl">🔵</span>
+              <span className="text-2xl">🔴</span>
               <span className="text-sm font-medium text-white/80 uppercase tracking-wide">Team 1</span>
             </div>
             <div className="text-3xl font-bold">{gameStats.team0_points.toLocaleString()}</div>
           </div>
-          <div className="bg-gradient-to-br from-red-500 to-red-600 rounded-xl p-5 text-white shadow-lg">
+          <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl p-5 text-white shadow-lg">
             <div className="flex items-center gap-2 mb-2">
-              <span className="text-2xl">🔴</span>
+              <span className="text-2xl">🔵</span>
               <span className="text-sm font-medium text-white/80 uppercase tracking-wide">Team 2</span>
             </div>
             <div className="text-3xl font-bold">{gameStats.team1_points.toLocaleString()}</div>

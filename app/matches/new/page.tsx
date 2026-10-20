@@ -238,8 +238,9 @@ function NewMatchContent() {
       <form onSubmit={handleSubmit} className="space-y-6">
         {/* Teams Section */}
         <div className="grid grid-cols-2 gap-6">
-          {/* Team 1 */}
-          <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl p-5 text-white">
+          {/* Team 1 — red side everywhere (matches the gamble/bookie sides
+              and the live scorer; teams[0] = red) */}
+          <div className="bg-gradient-to-br from-red-500 to-red-600 rounded-xl p-5 text-white">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-bold">Team 1</h2>
               <span className="text-3xl font-bold">{team1Score}</span>
@@ -278,8 +279,8 @@ function NewMatchContent() {
             </div>
           </div>
 
-          {/* Team 2 */}
-          <div className="bg-gradient-to-br from-red-500 to-red-600 rounded-xl p-5 text-white">
+          {/* Team 2 — blue side */}
+          <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl p-5 text-white">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-bold">Team 2</h2>
               <span className="text-3xl font-bold">{team2Score}</span>
@@ -323,33 +324,33 @@ function NewMatchContent() {
           <h3 className="text-lg font-semibold mb-4 text-center">Score</h3>
           <div className="flex items-center justify-center gap-8">
             <div className="text-center">
-              <label className="block text-sm font-medium text-blue-600 mb-2">Team 1</label>
+              <label className="block text-sm font-medium text-red-600 mb-2">Team 1</label>
               <input
                 type="number"
                 value={team1Score}
                 onChange={(e) => setTeam1Score(e.target.value)}
                 min="0"
-                className="w-24 text-center text-4xl font-bold border-2 border-blue-200 rounded-xl px-3 py-2 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                className="w-24 text-center text-4xl font-bold border-2 border-red-200 rounded-xl px-3 py-2 focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-200"
               />
             </div>
             <div className="text-3xl font-bold text-gray-300">VS</div>
             <div className="text-center">
-              <label className="block text-sm font-medium text-red-600 mb-2">Team 2</label>
+              <label className="block text-sm font-medium text-blue-600 mb-2">Team 2</label>
               <input
                 type="number"
                 value={team2Score}
                 onChange={(e) => setTeam2Score(e.target.value)}
                 min="0"
-                className="w-24 text-center text-4xl font-bold border-2 border-red-200 rounded-xl px-3 py-2 focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-200"
+                className="w-24 text-center text-4xl font-bold border-2 border-blue-200 rounded-xl px-3 py-2 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
               />
             </div>
           </div>
           <div className="text-center mt-4">
             <span className={`inline-flex items-center gap-2 px-4 py-2 rounded-full text-lg font-semibold ${
               score1 > score2
-                ? 'bg-blue-100 text-blue-700'
-                : score2 > score1
                 ? 'bg-red-100 text-red-700'
+                : score2 > score1
+                ? 'bg-blue-100 text-blue-700'
                 : 'bg-gray-100 text-gray-700'
             }`}>
               {score1 > score2 ? '🏆 Team 1 wins!' : score2 > score1 ? '🏆 Team 2 wins!' : '⚖️ Tie'}
@@ -377,10 +378,10 @@ function NewMatchContent() {
             </div>
             <div className="mt-3 pt-3 border-t border-slate-700 grid grid-cols-2 gap-4 text-xs text-slate-400">
               <div>
-                <span className="text-blue-400">Team 1 Elo:</span> {prediction.team1Elo.toFixed(0)} | Expected: {prediction.expectedTeam1Score}
+                <span className="text-red-400">Team 1 Elo:</span> {prediction.team1Elo.toFixed(0)} | Expected: {prediction.expectedTeam1Score}
               </div>
               <div>
-                <span className="text-red-400">Team 2 Elo:</span> {prediction.team2Elo.toFixed(0)} | Expected: {prediction.expectedTeam2Score}
+                <span className="text-blue-400">Team 2 Elo:</span> {prediction.team2Elo.toFixed(0)} | Expected: {prediction.expectedTeam2Score}
               </div>
             </div>
           </div>
@@ -405,14 +406,14 @@ function NewMatchContent() {
                     <button
                       type="button"
                       onClick={() => togglePlayer(1, player.id)}
-                      className="px-2 py-1.5 text-sm font-medium bg-card text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors"
+                      className="px-2 py-1.5 text-sm font-medium bg-card text-gray-700 hover:bg-red-50 hover:text-red-700 transition-colors"
                     >
                       {player.name}
                     </button>
                     <button
                       type="button"
                       onClick={() => togglePlayer(1, player.id)}
-                      className="px-2 py-1.5 text-sm font-bold bg-blue-100 text-blue-700 hover:bg-blue-200 transition-colors"
+                      className="px-2 py-1.5 text-sm font-bold bg-red-100 text-red-700 hover:bg-red-200 transition-colors"
                       title="Add to Team 1"
                     >
                       T1
@@ -420,7 +421,7 @@ function NewMatchContent() {
                     <button
                       type="button"
                       onClick={() => togglePlayer(2, player.id)}
-                      className="px-2 py-1.5 text-sm font-bold bg-red-100 text-red-700 hover:bg-red-200 transition-colors"
+                      className="px-2 py-1.5 text-sm font-bold bg-blue-100 text-blue-700 hover:bg-blue-200 transition-colors"
                       title="Add to Team 2"
                     >
                       T2

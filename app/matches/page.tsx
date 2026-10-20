@@ -568,17 +568,12 @@ function MatchesPageContent() {
                 {/* VS Layout */}
                 <div className="p-5">
                   <div className="flex items-center justify-between gap-4">
-                    {/* Team 1 */}
-                    <div className={`flex-1 rounded-xl p-4 ${
-                      team0Result.result === "win"
-                        ? "bg-gradient-to-br from-blue-500 to-blue-600 text-white"
-                        : team0Result.result === "loss"
-                        ? "bg-gray-100 text-gray-700"
-                        : "bg-gray-100 text-gray-700"
-                    }`}>
+                    {/* Team 1 — red side everywhere (bookie sides, recorder);
+                        result shows in the 🏆 pill, not the colour */}
+                    <div className={`flex-1 rounded-xl p-4 text-white bg-gradient-to-br from-red-500 to-red-600`}>
                       <div className="flex items-center justify-between mb-3">
                         <span className={`text-xs font-semibold uppercase tracking-wide ${
-                          team0Result.result === "win" ? "text-white/80" : "text-gray-500"
+                          team0Result.result === "win" ? "text-white/90" : "text-white/60"
                         }`}>
                           {team0Result.result === "win" ? "🏆 Winner" : "Team 1"}
                         </span>
@@ -599,7 +594,7 @@ function MatchesPageContent() {
                           <div key={p.player_id} className="flex items-center justify-between gap-2">
                             <Link
                               href={`/players/${p.player_id}`}
-                              className={`flex items-center gap-2 min-w-0 font-medium hover:underline ${team0Result.result === "win" ? "text-white" : "text-gray-900"}`}
+                              className={`flex items-center gap-2 min-w-0 font-medium hover:underline ${team0Result.result === "win" ? "text-white" : "text-white/75"}`}
                             >
                               <PlayerAvatar name={p.player_name} avatarUrl={p.avatar_url} size={28} roundedClass="rounded-lg" />
                               <span className="truncate">{p.player_name}</span>
@@ -607,10 +602,10 @@ function MatchesPageContent() {
                             {!isEditing && (
                               <span className={`text-sm font-mono ${
                                 p.elo_after > p.elo_before
-                                  ? team0Result.result === "win" ? "text-white/80" : "text-green-600"
+                                  ? team0Result.result === "win" ? "text-white/90" : "text-white/60"
                                   : p.elo_after < p.elo_before
-                                  ? team0Result.result === "win" ? "text-white/80" : "text-red-500"
-                                  : team0Result.result === "win" ? "text-white/80" : "text-gray-400"
+                                  ? team0Result.result === "win" ? "text-white/90" : "text-white/60"
+                                  : team0Result.result === "win" ? "text-white/90" : "text-white/40"
                               }`}>
                                 {formatRatingChange(p.elo_before, p.elo_after)}
                               </span>
@@ -627,17 +622,11 @@ function MatchesPageContent() {
                       </div>
                     </div>
 
-                    {/* Team 2 */}
-                    <div className={`flex-1 rounded-xl p-4 ${
-                      team1Result.result === "win"
-                        ? "bg-gradient-to-br from-red-500 to-red-600 text-white"
-                        : team1Result.result === "loss"
-                        ? "bg-gray-100 text-gray-700"
-                        : "bg-gray-100 text-gray-700"
-                    }`}>
+                    {/* Team 2 — blue side */}
+                    <div className={`flex-1 rounded-xl p-4 text-white bg-gradient-to-br from-blue-500 to-blue-600`}>
                       <div className="flex items-center justify-between mb-3">
                         <span className={`text-xs font-semibold uppercase tracking-wide ${
-                          team1Result.result === "win" ? "text-white/80" : "text-gray-500"
+                          team1Result.result === "win" ? "text-white/90" : "text-white/60"
                         }`}>
                           {team1Result.result === "win" ? "🏆 Winner" : "Team 2"}
                         </span>
@@ -658,7 +647,7 @@ function MatchesPageContent() {
                           <div key={p.player_id} className="flex items-center justify-between gap-2">
                             <Link
                               href={`/players/${p.player_id}`}
-                              className={`flex items-center gap-2 min-w-0 font-medium hover:underline ${team1Result.result === "win" ? "text-white" : "text-gray-900"}`}
+                              className={`flex items-center gap-2 min-w-0 font-medium hover:underline ${team1Result.result === "win" ? "text-white" : "text-white/75"}`}
                             >
                               <PlayerAvatar name={p.player_name} avatarUrl={p.avatar_url} size={28} roundedClass="rounded-lg" />
                               <span className="truncate">{p.player_name}</span>
@@ -666,10 +655,10 @@ function MatchesPageContent() {
                             {!isEditing && (
                               <span className={`text-sm font-mono ${
                                 p.elo_after > p.elo_before
-                                  ? team1Result.result === "win" ? "text-white/80" : "text-green-600"
+                                  ? team1Result.result === "win" ? "text-white/90" : "text-white/60"
                                   : p.elo_after < p.elo_before
-                                  ? team1Result.result === "win" ? "text-white/80" : "text-red-500"
-                                  : team1Result.result === "win" ? "text-white/80" : "text-gray-400"
+                                  ? team1Result.result === "win" ? "text-white/90" : "text-white/60"
+                                  : team1Result.result === "win" ? "text-white/90" : "text-white/40"
                               }`}>
                                 {formatRatingChange(p.elo_before, p.elo_after)}
                               </span>

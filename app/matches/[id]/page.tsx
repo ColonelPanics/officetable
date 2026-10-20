@@ -110,7 +110,8 @@ function TimelineCard({
   const lastAt = events[events.length - 1]?.at ?? 1;
   const totalX = Math.max(stats.durationMs ?? 0, lastAt) || 1;
   const maxScore = Math.max(1, ...stats.teams.map((t) => t.score));
-  const colors = ['#2563eb', '#dc2626', '#059669', '#7c3aed'];
+  // team 0 = red side, team 1 = blue side (matches the bookie + recorder)
+  const colors = ['#dc2626', '#2563eb', '#059669', '#7c3aed'];
 
   const x = (at: number) => padX + (at / totalX) * (W - padX - padRight);
   const y = (score: number) => H - padBottom - (score / maxScore) * (H - padTop - padBottom);
@@ -431,27 +432,17 @@ export default function MatchDetailsPage() {
       {/* Score Display */}
       <div className="bg-card rounded-2xl shadow-lg overflow-hidden mb-6">
         <div className="grid grid-cols-2">
-          {/* Team 1 */}
-          <div className={`p-6 ${
-            team1Result.result === 'win' ? 'bg-gradient-to-br from-blue-500 to-blue-600' :
-            team1Result.result === 'loss' ? 'bg-gradient-to-br from-red-500 to-red-600' :
-            'bg-gradient-to-br from-gray-400 to-gray-500 dark:from-[#3f4756] dark:to-[#333a46]'
-          }`}>
+          {/* Team 1 — red side: teams[0] = red everywhere (bookie sides,
+              live scorer, recorder); result shows in the pill, not the colour */}
+          <div className="p-6 bg-gradient-to-br from-red-500 to-red-600">
             <div className="text-center mb-4">
-              <div className={`text-sm font-semibold uppercase tracking-wide mb-1 ${
-                team1Result.result === 'win' ? 'text-white/85' :
-                team1Result.result === 'loss' ? 'text-white/85' : 'text-white'
-              }`}>
+              <div className="text-sm font-semibold uppercase tracking-wide mb-1 text-white/85">
                 Team 1
               </div>
               <div className="text-6xl font-bold text-white">
                 {team1Result.score}
               </div>
-              <div className={`mt-2 inline-block px-3 py-1 rounded-full text-sm font-bold ${
-                team1Result.result === 'win' ? 'bg-card/20 text-white' :
-                team1Result.result === 'loss' ? 'bg-card/20 text-white' :
-                'bg-card/20 text-white'
-              }`}>
+              <div className="mt-2 inline-block px-3 py-1 rounded-full text-sm font-bold bg-card/20 text-white">
                 {team1Result.result === 'win' ? '🏆 Winner' : team1Result.result === 'loss' ? 'Defeat' : '🤝 Draw'}
               </div>
             </div>
@@ -461,27 +452,16 @@ export default function MatchDetailsPage() {
           <div className="relative">
             <div className="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-transparent via-gray-300 to-transparent -translate-x-0.5" />
 
-            {/* Team 2 */}
-            <div className={`p-6 ${
-              team2Result.result === 'win' ? 'bg-gradient-to-br from-blue-500 to-blue-600' :
-              team2Result.result === 'loss' ? 'bg-gradient-to-br from-red-500 to-red-600' :
-              'bg-gradient-to-br from-gray-400 to-gray-500 dark:from-[#3f4756] dark:to-[#333a46]'
-            }`}>
+            {/* Team 2 — blue side */}
+            <div className="p-6 bg-gradient-to-br from-blue-500 to-blue-600">
               <div className="text-center mb-4">
-                <div className={`text-sm font-semibold uppercase tracking-wide mb-1 ${
-                  team2Result.result === 'win' ? 'text-white/85' :
-                  team2Result.result === 'loss' ? 'text-white/85' : 'text-white'
-                }`}>
+                <div className="text-sm font-semibold uppercase tracking-wide mb-1 text-white/85">
                   Team 2
                 </div>
                 <div className="text-6xl font-bold text-white">
                   {team2Result.score}
                 </div>
-                <div className={`mt-2 inline-block px-3 py-1 rounded-full text-sm font-bold ${
-                  team2Result.result === 'win' ? 'bg-card/20 text-white' :
-                  team2Result.result === 'loss' ? 'bg-card/20 text-white' :
-                  'bg-card/20 text-white'
-                }`}>
+                <div className="mt-2 inline-block px-3 py-1 rounded-full text-sm font-bold bg-card/20 text-white">
                   {team2Result.result === 'win' ? '🏆 Winner' : team2Result.result === 'loss' ? 'Defeat' : '🤝 Draw'}
                 </div>
               </div>
