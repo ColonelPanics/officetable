@@ -820,6 +820,61 @@ function challengeHasSlots(challengeId: number): boolean {
     .get(challengeId) as { n: number }).n > 0;
 }
 
+/**
+ * The open/awaiting gamble match (for this game) whose roster seats match the
+ * two recorded sides — either side order — with the teams NORMALISED to the
+ * gamble's red/blue seating. The seat comparison is order-free SETS, but
+ * settleGambleMatch picks its sides by the `team` field, so a lineup recorded
+ * in the opposite orientation must have its labels rewritten here (and the
+ * live timeline's team indexes remapped by the caller when `flipped`).
+ * Returns null when no open gamble matches.
+ */
+export function findAttachedGamble(
+  gameId: number,
+  teams: { team: number; player_ids: number[]; score: number }[]
+): { gambleId: number; teams: { team: number; player_ids: number[]; score: number }[]; rosterAll: number[]; flipped: boolean } | null {
+  const openGambleRows = db.prepare(`
+    SELECT id FROM gamble_matches
+    WHERE game_id = ? AND status IN ('open', 'awaiting_score')
+    ORDER BY id DESC
+  `).all(gameId) as { id: number }[];
+  const rosterStmt = db.prepare(`
+    SELECT team, player_id FROM gamble_match_participants WHERE gamble_match_id = ?
+  `);
+  const side0Ids = [...new Set(teams[0].player_ids)];
+  const side1Ids = [...new Set(teams[1].player_ids)];
+  const sameSeats = (a: number[], b: number[]) =>
+    a.length === b.length && [...a].sort((x, y) => x - y).every((v, i) => v === [...b].sort((x, y) => x - y)[i]);
+
+  for (const gmRow of openGambleRows) {
+    const roster = rosterStmt.all(gmRow.id) as { team: number; player_id: number }[];
+    const seat0 = [...new Set(roster.filter(r => r.team === 0).map(r => r.player_id))];
+    const seat1 = [...new Set(roster.filter(r => r.team === 1).map(r => r.player_id))];
+    let sideRed = teams[0];
+    let sideBlue = teams[1];
+    let flipped = false;
+    if (sameSeats(side0Ids, seat0) && sameSeats(side1Ids, seat1)) {
+      // straight — recorded Team 1 IS the gamble's red side
+    } else if (sameSeats(side0Ids, seat1) && sameSeats(side1Ids, seat0)) {
+      sideRed = teams[1];
+      sideBlue = teams[0];
+      flipped = true;
+    } else {
+      continue;
+    }
+    return {
+      gambleId: gmRow.id,
+      teams: [
+        { team: 0, player_ids: sideRed.player_ids, score: sideRed.score },
+        { team: 1, player_ids: sideBlue.player_ids, score: sideBlue.score },
+      ],
+      rosterAll: [...new Set(roster.map(r => r.player_id))],
+      flipped,
+    };
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Bets
 // ---------------------------------------------------------------------------

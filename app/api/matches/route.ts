@@ -6,7 +6,7 @@ import { sendGoogleChatNotification, buildMatchNotification } from '@/lib/notifi
 import { getAchievementsForMatch } from '@/lib/achievements';
 import { getPunditryForMatch } from '@/lib/punditry';
 import { resolveScopeSeasonId, getCurrentSeason } from '@/lib/seasons';
-import { syncStatuses, settleGambleMatch, getGambleMatch, GambleError } from '@/lib/gamble';
+import { syncStatuses, settleGambleMatch, getGambleMatch, findAttachedGamble, GambleError } from '@/lib/gamble';
 import { announceSettled } from '@/lib/gambleNotifications';
 import { requirePlayerId } from '@/lib/gambleApi';
 import { readSessionPlayer } from '@/lib/session';
@@ -238,50 +238,16 @@ export async function POST(request: NextRequest) {
     syncStatuses();
     const hasPlayers = (t: CreateMatchInput['teams'][number]) => Array.isArray(t.player_ids) && t.player_ids.length > 0;
     if (teams.length === 2 && hasPlayers(teams[0]) && hasPlayers(teams[1])) {
-      // Seat sets (deduped, order-free) for both recorded sides
-      const side0Ids = [...new Set(teams[0].player_ids)];
-      const side1Ids = [...new Set(teams[1].player_ids)];
       let recordedBy: number | null = null;
       if (body.recorded_by != null) {
         try { recordedBy = requirePlayerId(body.recorded_by); } catch { recordedBy = null; }
       }
 
-      // Candidate open gambles for this game — match on full roster seat sets,
-      // either orientation (gamble_match_participants is backfilled for all
-      // legacy 1v1s, so the roster table is always complete).
-      const openGambleRows = db.prepare(`
-        SELECT id FROM gamble_matches
-        WHERE game_id = ? AND status IN ('open', 'awaiting_score')
-        ORDER BY id DESC
-      `).all(game_id) as { id: number }[];
-      const rosterStmt = db.prepare(`
-        SELECT team, player_id FROM gamble_match_participants WHERE gamble_match_id = ?
-      `);
-      const sameSeats = (a: number[], b: number[]) =>
-        a.length === b.length && [...a].sort((x, y) => x - y).every((v, i) => v === [...b].sort((x, y) => x - y)[i]);
-
-      let attached: { gambleId: number; redTeam: CreateMatchInput['teams'][number]; blueTeam: CreateMatchInput['teams'][number]; rosterAll: number[] } | null = null;
-      for (const gmRow of openGambleRows) {
-        const roster = rosterStmt.all(gmRow.id) as { team: number; player_id: number }[];
-        const seat0 = [...new Set(roster.filter(r => r.team === 0).map(r => r.player_id))];
-        const seat1 = [...new Set(roster.filter(r => r.team === 1).map(r => r.player_id))];
-        let redTeam: CreateMatchInput['teams'][number]
-        let blueTeam: CreateMatchInput['teams'][number]
-        if (sameSeats(side0Ids, seat0) && sameSeats(side1Ids, seat1)) {
-          redTeam = teams[0]; blueTeam = teams[1];
-        } else if (sameSeats(side0Ids, seat1) && sameSeats(side1Ids, seat0)) {
-          redTeam = teams[1]; blueTeam = teams[0];
-        } else {
-          continue;
-        }
-        attached = {
-          gambleId: gmRow.id,
-          redTeam,
-          blueTeam,
-          rosterAll: [...new Set(roster.map(r => r.player_id))],
-        };
-        break;
-      }
+      // Candidate: the open gamble this record settles, with teams already
+      // normalised to the gamble's red/blue seating (either recorded side
+      // order attaches — a reversed lineup gets its `team` labels rewritten,
+      // otherwise settleGambleMatch misreads the sides and rejects it).
+      const attached = findAttachedGamble(game_id as number, teams);
 
       if (attached) {
         // Settling a gamble moves real money, so under the session model the
@@ -319,7 +285,12 @@ export async function POST(request: NextRequest) {
         }
         let summary;
         try {
-          summary = settleGambleMatch(attached.gambleId, [attached.redTeam, attached.blueTeam], notes, timeline);
+          // A flipped attach's timeline was validated against the recorded side
+          // order — remap event team indexes to the gamble's red/blue order.
+          const settledTimeline = attached.flipped && timeline && timeline.events
+            ? { ...timeline, events: timeline.events.map(e => ({ ...e, team: 1 - e.team })) }
+            : timeline;
+          summary = settleGambleMatch(attached.gambleId, attached.teams, notes, settledTimeline);
         } catch (e) {
           // Gamble-side rejections (bets still open, teams mismatch…) surface
           // as their own message — a plain "failed to create match" would
