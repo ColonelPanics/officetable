@@ -352,14 +352,16 @@ function LiveMatchContent() {
         )}
 
         {/* Teams */}
+        {/* Teams — Team 1 renders RED throughout this scorer: team 1 is sent
+            as teams[0] = the bookie's red side (team 0 = red, 1 = blue). */}
         <div className="grid grid-cols-2 gap-3 mb-4">
           {[1, 2].map((teamNum) => {
-            const isBlue = teamNum === 1;
-            const selected = isBlue ? team1Players : team2Players;
+            const isTeam1 = teamNum === 1;
+            const selected = isTeam1 ? team1Players : team2Players;
             return (
-              <div key={teamNum} className={`rounded-xl p-4 text-white ${isBlue ? 'bg-gradient-to-br from-blue-500 to-blue-600' : 'bg-gradient-to-br from-red-500 to-red-600'}`}>
+              <div key={teamNum} className={`rounded-xl p-4 text-white ${isTeam1 ? 'bg-gradient-to-br from-red-500 to-red-600' : 'bg-gradient-to-br from-blue-500 to-blue-600'}`}>
                 <div className="flex items-center justify-between mb-3">
-                  <h2 className="font-bold">{isBlue ? 'Team 1' : 'Team 2'}</h2>
+                  <h2 className="font-bold">{isTeam1 ? 'Team 1' : 'Team 2'}</h2>
                   <span className="text-sm text-white/80">{selected.length > 0 ? `${selected.length} player${selected.length > 1 ? 's' : ''}` : 'Tap below'}</span>
                 </div>
                 <div className="space-y-1.5 min-h-[36px]">
@@ -392,7 +394,7 @@ function LiveMatchContent() {
 
         {/* Add players */}
         <div className="bg-card rounded-xl shadow-lg p-4 mb-6">
-          <h3 className="text-xs font-semibold mb-3 text-gray-500 uppercase tracking-wide">Add players (B = Team 1, R = Team 2)</h3>
+          <h3 className="text-xs font-semibold mb-3 text-gray-500 uppercase tracking-wide">Add players (R = Team 1, B = Team 2)</h3>
           <div className="flex flex-wrap gap-2">
             {availablePlayers.map((player) => {
               const rating = ratings.find((r) => r.player_id === player.id);
@@ -413,16 +415,16 @@ function LiveMatchContent() {
                   <button
                     type="button"
                     onClick={() => togglePlayer(1, player.id)}
-                    className="px-2 py-2 text-xs font-bold bg-blue-100 text-blue-700 hover:bg-blue-200 transition-colors"
+                    className="px-2 py-2 text-xs font-bold bg-red-100 text-red-700 hover:bg-red-200 transition-colors"
                   >
-                    B
+                    R
                   </button>
                   <button
                     type="button"
                     onClick={() => togglePlayer(2, player.id)}
-                    className="px-2 py-2 text-xs font-bold bg-red-100 text-red-700 hover:bg-red-200 transition-colors"
+                    className="px-2 py-2 text-xs font-bold bg-blue-100 text-blue-700 hover:bg-blue-200 transition-colors"
                   >
-                    R
+                    B
                   </button>
                 </div>
               );
@@ -501,11 +503,11 @@ function LiveMatchContent() {
 
         {/* Scoreline */}
         <div className="grid grid-cols-2 gap-3 mb-3">
-          <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl p-4 text-white text-center">
+          <div className="bg-gradient-to-br from-red-500 to-red-600 rounded-xl p-4 text-white text-center">
             <div className="text-xs font-semibold uppercase tracking-wide mb-1 opacity-80">{team1Name}</div>
             <div className="text-6xl font-bold tabular-nums">{score1}</div>
           </div>
-          <div className="bg-gradient-to-br from-red-500 to-red-600 rounded-xl p-4 text-white text-center">
+          <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl p-4 text-white text-center">
             <div className="text-xs font-semibold uppercase tracking-wide mb-1 opacity-80">{team2Name}</div>
             <div className="text-6xl font-bold tabular-nums">{score2}</div>
           </div>
@@ -517,7 +519,7 @@ function LiveMatchContent() {
           <button
             type="button"
             onPointerDown={() => recordPoint(0)}
-            className="touch-manipulation bg-gradient-to-b from-blue-500 to-blue-600 text-white rounded-2xl py-10 text-4xl font-bold active:scale-95 active:from-blue-600 transition-transform shadow-lg"
+            className="touch-manipulation bg-gradient-to-b from-red-500 to-red-600 text-white rounded-2xl py-10 text-4xl font-bold active:scale-95 active:from-red-600 transition-transform shadow-lg"
           >
             <div className="text-2xl">{team1Name}</div>
             <div className="mt-2 text-sm font-normal opacity-80">+1 point</div>
@@ -525,7 +527,7 @@ function LiveMatchContent() {
           <button
             type="button"
             onPointerDown={() => recordPoint(1)}
-            className="touch-manipulation bg-gradient-to-b from-red-500 to-red-600 text-white rounded-2xl py-10 text-4xl font-bold active:scale-95 active:from-red-600 transition-transform shadow-lg"
+            className="touch-manipulation bg-gradient-to-b from-blue-500 to-blue-600 text-white rounded-2xl py-10 text-4xl font-bold active:scale-95 active:from-blue-600 transition-transform shadow-lg"
           >
             <div className="text-2xl">{team2Name}</div>
             <div className="mt-2 text-sm font-normal opacity-80">+1 point</div>
@@ -578,7 +580,7 @@ function LiveMatchContent() {
                     <div className="flex items-center gap-3 min-w-0">
                       <span className="text-xs text-gray-400 font-mono tabular-nums w-10">#{idx + 1}</span>
                       <span className="text-xs text-gray-400 font-mono tabular-nums w-10">{formatClock(ev.at)}</span>
-                      <span className={`text-sm truncate ${ev.team === 0 ? 'text-blue-600 font-medium' : 'text-red-600 font-medium'}`}>
+                      <span className={`text-sm truncate ${ev.team === 0 ? 'text-red-600 font-medium' : 'text-blue-600 font-medium'}`}>
                         {scorerTeam}
                       </span>
                       {running[0] === running[1] && (
