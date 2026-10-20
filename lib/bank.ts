@@ -94,10 +94,13 @@ function writeLedger(playerId: number | null, amount: number, ref: BankRef): voi
     INSERT INTO bank_transactions (ref_type, ref_id, player_id, amount, memo)
     VALUES (?, ?, ?, ?, ?)
   `).run(ref.type, ref.id ?? null, playerId, amount, ref.memo ?? null);
-  // Player movements mirror to the central bank as legs (outbox).
+  // Player movements mirror to the central bank as legs (outbox) — but ONLY
+  // for players with a linked account: legs for unlinked players can't ever
+  // send and would jam the drain behind them while REAL legs wait. An
+  // unlinked player's movement stays purely local bookkeeping.
   // House-only rows (house_fee, pot_house_cut, house_loss) stay local — the
   // bank's pot implicitly keeps the fees and cuts as a residual.
-  if (playerId !== null && alcesMirrorEnabled() && !SETTLE_RESOLVED_REFS.has(ref.type)) {
+  if (playerId !== null && alcesMirrorEnabled() && !SETTLE_RESOLVED_REFS.has(ref.type) && isBankLinked(playerId)) {
     db.prepare(`
       INSERT INTO bank_sync (transaction_id, status) VALUES (?, 'pending')
     `).run(result.lastInsertRowid);
@@ -446,6 +449,14 @@ export async function drainBankSync(): Promise<void> {
     const markDone = db.prepare(`
       UPDATE bank_sync SET status = 'done', error = NULL WHERE id = ?
     `);
+    // A job whose player has no usable linked account is DROPPED as done (with
+    // a note), not failed: per the house rules that money never leaves the
+    // pot and the leg must never send — and a burnout cycle here would jam
+    // the queue ahead of real legs (they stop the whole batch at the first
+    // failure).
+    const markSkipped = db.prepare(`
+      UPDATE bank_sync SET status = 'done', attempts = attempts + 1, error = ? WHERE id = ?
+    `);
     const markFailed = db.prepare(`
       UPDATE bank_sync SET status = 'failed', attempts = attempts + 1, error = ? WHERE id = ?
     `);
@@ -455,13 +466,19 @@ export async function drainBankSync(): Promise<void> {
     for (const job of jobs) {
       const tx = ledger.get(job.transaction_id) as
         { ref_type: string; player_id: number; amount: number } | undefined;
-      const acct = tx
-        ? (account.get(tx.player_id) as
-            { bank_username: string | null; bank_password: string | null } | undefined)
-        : undefined;
       try {
-        if (!tx || !acct?.bank_username || !acct.bank_password) {
-          throw new BankError('Player bank account unregistered', 'bank_not_linked');
+        if (!tx) {
+          throw new BankError('bank_sync job points at a missing ledger row', 'missing_ledger_row');
+        }
+        const acct = account.get(tx.player_id) as
+          { bank_username: string | null; bank_password: string | null } | undefined;
+        if (!acct?.bank_username || !acct.bank_password) {
+          markSkipped.run(
+            `skipped: player #${tx.player_id} has no linked bank account — this movement stays local and never leaves the pot`,
+            job.id,
+          );
+          progress = true;
+          continue;
         }
         // Credentials are encrypted at rest (lib/crypto.ts).
         const password = decryptSecret(acct.bank_password);

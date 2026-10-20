@@ -1,6 +1,6 @@
 import db from './db';
 import { resolveSeason, toDbDate } from './seasons';
-import { getBank } from './bank';
+import { getBank, isBankLinked, alcesMirrorEnabled } from './bank';
 import { computeTimelineStats, parsePointTimeline, MARATHON_MINUTES, SPRINT_MAX_MINUTES, RALLY_MINUTES, SLOW_OPEN_MINUTES, ALTERNATION_MIN_POINTS, longestAlternationRun, longestRally, type PointTimeline } from './timeline';
 
 export interface AchievementContext {
@@ -1322,6 +1322,13 @@ function payAchievementPayouts(results: AchievementResult[]): Map<number, number
   const bank = getBank();
   const paid = new Map<number, number>();
   for (const result of results) {
+    // On the central bank (mirror on), an achievement earned by a player
+    // without a linked bank account pays NOTHING: nothing is debited from
+    // the table's pot and nothing is credited to them — paying would either
+    // strand a leg on the bank (the drain can't send it) or mint phantom local
+    // money. Live with the achievement, skip the cash. Offline/mock mode pays
+    // everyone from the local mint.
+    if (alcesMirrorEnabled() && !isBankLinked(result.playerId)) continue;
     const pot = bank.getHouseBalance();
     if (pot < ACHIEVEMENT_PAYOUT) return paid; // table's pot has no cash left — stop paying
     const memo = `achievement payout — ${result.achievementName.replace(/_/g, ' ')}`;
