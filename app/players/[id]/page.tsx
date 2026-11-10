@@ -58,6 +58,10 @@ interface Achievement {
   achievement_icon: string | null;
   count: number;
   first_earned_at: string;
+  /** Comma-joined distinct season ids this entry was earned in (all-time rollup). */
+  earned_season_ids: string | null;
+  /** Earn count inside the currently scoped season. */
+  season_count: number;
 }
 
 interface AllAchievement {

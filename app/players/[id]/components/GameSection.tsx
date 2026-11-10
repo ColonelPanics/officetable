@@ -3,6 +3,7 @@ import { EloChart } from './EloChart';
 import { RecentMatches } from './RecentMatches';
 import { CategoryProgressBars, buildCategoryProgress } from './CategoryProgressBars';
 import { AchievementChecklist } from './AchievementChecklist';
+import { useSelectedGame } from '@/lib/hooks/useSelectedGame';
 
 interface EloHistoryPoint {
   elo: number;
@@ -53,6 +54,10 @@ interface Achievement {
   achievement_icon: string | null;
   count: number;
   first_earned_at: string;
+  /** Comma-joined distinct season ids this entry was earned in (all-time rollup). */
+  earned_season_ids: string | null;
+  /** Earn count inside the currently scoped season. */
+  season_count: number;
 }
 
 interface Opponent {
@@ -151,13 +156,30 @@ export function GameSection({
   defaultExpanded = true,
   showHeader = true,
 }: GameSectionProps) {
+  const { seasons, seasonView } = useSelectedGame();
   const totalGames = game.wins + game.losses + game.draws;
   const winRate = totalGames > 0 ? ((game.wins / totalGames) * 100).toFixed(1) : "0.0";
   const pointRatio = game.points_conceded > 0 ? game.points_scored / game.points_conceded : game.points_scored > 0 ? 999 : 0;
 
-  // Achievement data for this game
+  // Scope tag for the records card (R3): the values shown follow the global
+  // scope context — label it explicitly
+  const scopeTag =
+    seasonView === 'alltime'
+      ? 'All-time records'
+      : seasonView === 'current'
+        ? 'Current season records'
+        : `${seasons.find(s => s.id === seasonView)?.name ?? 'Season'} records`;
+
+  // Achievement data for this game — the ALL-TIME rollup (entries stay
+  // visible in any season view per A5; the scoped earn count feeds the summary)
   const unlockedIds = new Set(game.achievements.map(a => a.achievement_id));
-  const unlockedDetails = new Map(game.achievements.map(a => [a.achievement_id, { count: a.count, first_earned_at: a.first_earned_at }]));
+  const unlockedDetails = new Map(game.achievements.map(a => [a.achievement_id, {
+    count: a.count,
+    first_earned_at: a.first_earned_at,
+    earned_season_ids: a.earned_season_ids ?? null,
+    season_count: a.season_count ?? 0,
+  }]));
+  const seasonUnlockedCount = game.achievements.reduce((sum, a) => sum + (a.season_count > 0 ? 1 : 0), 0);
   const categoryProgress = buildCategoryProgress(allAchievements, unlockedIds);
 
   const rivalsOpponents = headToHeadData.get(game.game_id) || [];
@@ -233,11 +255,12 @@ export function GameSection({
         </div>
       </div>
 
-      {/* Records */}
+      {/* Records — values follow the global scope context (R3) */}
       <div className="px-6 py-4 bg-gradient-to-r from-amber-50 to-orange-50 border-t border-amber-100">
         <div className="flex items-center gap-2 mb-3">
           <span className="text-lg">🏆</span>
           <span className="text-sm font-semibold text-gray-700 uppercase tracking-wide">Records</span>
+          <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">{scopeTag}</span>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
           {/* Current form — the streak as of RIGHT NOW (W5/L2/D1, house convention) */}
@@ -390,6 +413,7 @@ export function GameSection({
         allAchievements={allAchievements}
         unlockedIds={unlockedIds}
         unlockedDetails={unlockedDetails}
+        seasonUnlockedCount={seasonUnlockedCount}
       />
 
       {/* Head to Head - Rivals Section */}

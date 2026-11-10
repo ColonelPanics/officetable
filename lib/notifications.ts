@@ -21,10 +21,16 @@ interface MatchNotification {
     achievementIcon?: string | null;
     /** Moose bucks paid from the table's pot for this achievement, when it paid. */
     payout?: number;
+    /** Season the achievement was earned in (null = all-time context). */
+    seasonLabel?: string | null;
   }[];
   punditry?: {
     description: string;
+    scope?: string;
+    notable?: boolean;
   }[];
+  /** Dedicated all-time record lines (R8) — this match set/extended all-time records. */
+  allTimeRecords?: { description: string }[];
   timestamp: string;
 }
 
@@ -210,14 +216,24 @@ export function buildChatCardsPayload(match: MatchNotification): Record<string, 
     });
   }
 
-  // Achievements (if present)
+  // Dedicated all-time record line (R8) — leads when history was made
+  if (match.allTimeRecords && match.allTimeRecords.length > 0) {
+    widgets.push({
+      textParagraph: {
+        text: match.allTimeRecords.map(r => `\u{1F3C6} <b>${r.description}</b>`).join('<br>')
+      }
+    });
+  }
+
+  // Achievements (if present) — each line tagged with the season it was earned in (R6)
   if (match.achievements && match.achievements.length > 0) {
     const achievementsText = match.achievements
       .map(a => {
         const icon = a.achievementIcon || '\u{1F3C5}';
         const name = a.achievementName.replace(/_/g, ' ');
         const payout = a.payout ? ` <i>(+${a.payout} moose bucks)</i>` : '';
-        return `${icon} <b>${a.playerName}</b>: ${name}${payout}`;
+        const season = a.seasonLabel ? ` <i>(${a.seasonLabel})</i>` : ' <i>(all-time)</i>';
+        return `${icon} <b>${a.playerName}</b>: ${name}${payout}${season}`;
       })
       .join('  \u00b7  ');
     widgets.push({
@@ -315,8 +331,12 @@ export function buildMatchNotification(
   notes?: string | null,
   rankChanges?: Map<number, number>,
   achievements?: { playerId: number; achievementName: string; achievementIcon?: string | null; payout?: number }[],
-  punditry?: { description: string }[],
-  playerAvatars?: Map<number, string>
+  punditry?: { description: string; scope?: string; notable?: boolean }[],
+  playerAvatars?: Map<number, string>,
+  /** Season this match was played in; tags the achievement lines (R6). */
+  seasonLabel?: string | null,
+  /** One entry per all-time record set by this match (R8). */
+  allTimeRecords?: { description: string }[]
 ): MatchNotification {
   const maxScore = Math.max(...teams.map(t => t.score));
   const winners = teams.filter(t => t.score === maxScore);
@@ -345,9 +365,11 @@ export function buildMatchNotification(
       playerName: playerNames.get(a.playerId) || `Player ${a.playerId}`,
       achievementName: a.achievementName,
       achievementIcon: a.achievementIcon,
-      payout: a.payout
+      payout: a.payout,
+      seasonLabel: seasonLabel ?? null
     })),
-    punditry: punditry?.map(p => ({ description: p.description })),
+    punditry: punditry?.map(p => ({ description: p.description, scope: p.scope, notable: p.notable })),
+    allTimeRecords,
     timestamp: new Date().toISOString()
   };
 }

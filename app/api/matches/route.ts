@@ -5,7 +5,7 @@ import { processMatch } from '@/lib/elo';
 import { sendGoogleChatNotification, buildMatchNotification } from '@/lib/notifications';
 import { getAchievementsForMatch } from '@/lib/achievements';
 import { getPunditryForMatch } from '@/lib/punditry';
-import { resolveScopeSeasonId, getCurrentSeason } from '@/lib/seasons';
+import { resolveScopeSeasonId, getCurrentSeason, getSeason } from '@/lib/seasons';
 import { syncStatuses, settleGambleMatch, getGambleMatch, findAttachedGamble, GambleError } from '@/lib/gamble';
 import { announceSettled } from '@/lib/gambleNotifications';
 import { requirePlayerId } from '@/lib/gambleApi';
@@ -412,6 +412,15 @@ export async function POST(request: NextRequest) {
 
     // Get punditry facts for this match
     const punditryFacts = getPunditryForMatch(result.matchId);
+    const notablePunditry = punditryFacts.filter(p => p.notable);
+
+    // R8: dedicated all-time record lines — the match set/extended an all-time
+    // participant record (elo high/low or win/loss streak, per A4)
+    const ALLTIME_RECORD_TYPES = new Set(['highest_skill', 'lowest_skill', 'longest_win_streak', 'longest_lose_streak']);
+    const allTimeRecords = notablePunditry
+      .filter(p => p.scope === 'all-time' && ALLTIME_RECORD_TYPES.has(p.type))
+      .map(p => ({ description: p.description }));
+    const seasonLabel = getSeason(result.seasonId)?.name ?? null;
 
     // Send notification (async, don't wait for it)
     if (game) {
@@ -430,8 +439,10 @@ export async function POST(request: NextRequest) {
           achievementIcon: a.achievement_icon,
           payout: a.payout
         })),
-        punditryFacts.map(p => ({ description: p.description })),
-        playerAvatarMap
+        notablePunditry.map(p => ({ description: p.description, scope: p.scope, notable: true })),
+        playerAvatarMap,
+        seasonLabel,
+        allTimeRecords
       );
       sendGoogleChatNotification(notification).catch(err => {
         console.error('Failed to send notification:', err);

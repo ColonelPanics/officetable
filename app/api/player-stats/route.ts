@@ -370,7 +370,9 @@ export async function GET(request: NextRequest) {
       };
     }
 
-    // Get achievements for this game
+    // Achievements — ALWAYS the all-time rollup (A5): every earned entry stays
+    // visible in any season view, tagged with the seasons it was earned in.
+    // season_count carries the in-scope-earn count for the summary line.
     const achievementsStmt = db.prepare(`
       SELECT
         a.id as achievement_id,
@@ -379,10 +381,12 @@ export async function GET(request: NextRequest) {
         a.category as achievement_category,
         a.icon as achievement_icon,
         COUNT(*) as count,
-        MIN(pa.earned_at) as first_earned_at
+        MIN(pa.earned_at) as first_earned_at,
+        GROUP_CONCAT(DISTINCT pa.season_id) as earned_season_ids,
+        SUM(CASE WHEN pa.season_id = ? THEN 1 ELSE 0 END) as season_count
       FROM player_achievements pa
       JOIN achievements a ON pa.achievement_id = a.id
-      WHERE pa.player_id = ? AND pa.game_id = ?${isAllTime ? '' : ' AND pa.season_id = ?'}
+      WHERE pa.player_id = ? AND pa.game_id = ?
       GROUP BY a.id
       ORDER BY
         CASE a.category
@@ -395,7 +399,7 @@ export async function GET(request: NextRequest) {
         END,
         a.name
     `);
-    const achievements = achievementsStmt.all(...scopeParams([parseInt(playerId), game.id])) as {
+    const achievements = achievementsStmt.all(targetSeasonId, parseInt(playerId), game.id) as {
       achievement_id: number;
       achievement_name: string;
       achievement_description: string;
@@ -403,6 +407,8 @@ export async function GET(request: NextRequest) {
       achievement_icon: string | null;
       count: number;
       first_earned_at: string;
+      earned_season_ids: string | null;
+      season_count: number;
     }[];
 
     gameStats.push({

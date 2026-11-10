@@ -20,6 +20,10 @@ interface PunditryFact {
   player_id: number;
   player_name: string;
   description: string;
+  /** Scope the claim is about: 'all-time', a season name, or 'match'. */
+  scope?: string;
+  /** True when the fact set/extended/broke an all-time or seasonal record. */
+  notable?: boolean;
   metadata?: Record<string, unknown>;
 }
 
@@ -600,50 +604,83 @@ export default function MatchDetailsPage() {
         </div>
       )}
 
-      {/* Punditry */}
-      {match.punditry && match.punditry.length > 0 && (
-        <div className="bg-card rounded-2xl shadow-lg overflow-hidden mb-6">
-          <div className="px-6 py-4 bg-gradient-to-r from-slate-800 to-slate-900">
-            <div className="flex items-center gap-3">
-              <span className="text-2xl">🎙️</span>
-              <div>
-                <div className="text-lg font-bold text-white">Punditry</div>
-                <div className="text-sm text-slate-400">Match insights and analysis</div>
+      {/* Punditry — two tiers per the run spec: notable records highlighted, the rest quiet */}
+      {(() => {
+        if (!match.punditry || match.punditry.length === 0) return null;
+        const notableFacts = match.punditry.filter(f => f.notable);
+        const secondaryFacts = match.punditry.filter(f => !f.notable);
+
+        const renderFact = (fact: PunditryFact, idx: number) => {
+          const icon = getPunditryIcon(fact.type);
+          const style = getPunditryStyle(fact.type);
+          return (
+            <div
+              key={idx}
+              className={`flex items-start gap-4 p-4 rounded-xl bg-gradient-to-r ${style.bg} border ${style.border}`}
+            >
+              <div className={`w-12 h-12 rounded-xl ${style.iconBg} flex items-center justify-center text-2xl shrink-0`}>
+                {icon}
+              </div>
+              <div className="flex-1">
+                {fact.player_name && (
+                  <Link
+                    href={`/players/${fact.player_id}`}
+                    className="font-semibold text-primary hover:underline"
+                  >
+                    {fact.player_name}
+                  </Link>
+                )}
+                <p className="text-gray-700 mt-1">
+                  {fact.description}
+                </p>
+              </div>
+              <span className={`shrink-0 mt-1 px-2 py-0.5 rounded-full text-xs font-semibold ${
+                fact.scope === 'all-time'
+                  ? 'bg-indigo-100 text-indigo-700'
+                  : fact.scope === 'match'
+                    ? 'bg-gray-100 text-gray-600'
+                    : 'bg-blue-100 text-blue-700'
+              }`}>
+                {fact.scope}
+              </span>
+            </div>
+          );
+        };
+
+        return (
+          <div className="bg-card rounded-2xl shadow-lg overflow-hidden mb-6">
+            <div className="px-6 py-4 bg-gradient-to-r from-slate-800 to-slate-900">
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">🎙️</span>
+                <div>
+                  <div className="text-lg font-bold text-white">Punditry</div>
+                  <div className="text-sm text-slate-400">Match insights and analysis</div>
+                </div>
               </div>
             </div>
-          </div>
-          <div className="p-6 space-y-4">
-            {match.punditry.map((fact, idx) => {
-              const icon = getPunditryIcon(fact.type);
-              const style = getPunditryStyle(fact.type);
-
-              return (
-                <div
-                  key={idx}
-                  className={`flex items-start gap-4 p-4 rounded-xl bg-gradient-to-r ${style.bg} border ${style.border}`}
-                >
-                  <div className={`w-12 h-12 rounded-xl ${style.iconBg} flex items-center justify-center text-2xl shrink-0`}>
-                    {icon}
-                  </div>
-                  <div className="flex-1">
-                    {fact.player_name && (
-                      <Link
-                        href={`/players/${fact.player_id}`}
-                        className="font-semibold text-primary hover:underline"
-                      >
-                        {fact.player_name}
-                      </Link>
-                    )}
-                    <p className="text-gray-700 mt-1">
-                      {fact.description}
-                    </p>
-                  </div>
+            {notableFacts.length > 0 && (
+              <div className="px-6 pt-6">
+                <div className="text-xs font-bold uppercase tracking-wider text-amber-600 mb-2">
+                  ⭐ Highlights — records set here
                 </div>
-              );
-            })}
+                <div className="space-y-4">
+                  {notableFacts.map((fact, idx) => renderFact(fact, idx))}
+                </div>
+              </div>
+            )}
+            {secondaryFacts.length > 0 && (
+              <div className="p-6 space-y-4">
+                {notableFacts.length > 0 && (
+                  <div className="text-xs font-bold uppercase tracking-wider text-gray-400 pt-4 border-t">
+                    More from the commentators
+                  </div>
+                )}
+                {secondaryFacts.map((fact, idx) => renderFact(fact, idx))}
+              </div>
+            )}
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

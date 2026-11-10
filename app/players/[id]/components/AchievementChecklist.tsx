@@ -1,3 +1,5 @@
+import { useSelectedGame } from '@/lib/hooks/useSelectedGame';
+
 interface AllAchievement {
   id: number;
   name: string;
@@ -6,23 +8,30 @@ interface AllAchievement {
   icon: string | null;
 }
 
+interface SeasonInfo {
+  id: number;
+  name: string;
+  start_date: string;
+  end_date: string | null;
+  is_current?: boolean;
+  is_queued?: boolean;
+}
+
 interface UnlockedDetail {
   count: number;
   first_earned_at: string;
+  /** Comma-joined distinct season ids this entry was earned in (all-time rollup). */
+  earned_season_ids?: string | null;
+  /** Earn count inside the currently scoped season. */
+  season_count?: number;
 }
 
 interface AchievementChecklistProps {
   allAchievements: AllAchievement[];
   unlockedIds: Set<number>;
   unlockedDetails: Map<number, UnlockedDetail>;
-}
-
-function formatDate(dateStr: string) {
-  const date = new Date(dateStr);
-  return date.toLocaleDateString("en-US", {
-    month: "short",
-    year: "numeric",
-  });
+  /** Distinct achievements earned at least once in the currently scoped season. */
+  seasonUnlockedCount?: number;
 }
 
 const LOCK_ICON = (
@@ -31,10 +40,11 @@ const LOCK_ICON = (
   </svg>
 );
 
-function AchievementCard({ achievement, isUnlocked, details }: {
+function AchievementCard({ achievement, isUnlocked, details, seasonsById }: {
   achievement: AllAchievement;
   isUnlocked: boolean;
   details?: UnlockedDetail;
+  seasonsById: Map<number, string>;
 }) {
   const displayName = achievement.name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 
@@ -67,20 +77,31 @@ function AchievementCard({ achievement, isUnlocked, details }: {
         {!isUnlocked && LOCK_ICON}
       </div>
       {isUnlocked && details && (
-        <div className="mt-1.5 flex items-center gap-2 text-xs text-gray-400">
-          <span>Earned {formatDate(details.first_earned_at)}</span>
+        <div className="mt-1.5 flex items-center gap-2 text-xs text-gray-400 flex-wrap">
           {details.count > 1 && (
             <span className="bg-amber-100 text-amber-700 px-1.5 rounded-full font-semibold">
               ×{details.count}
             </span>
           )}
+          {/* Earned-season badge(s) (spec R4): which scope/season each earn is from */}
+          {(details.earned_season_ids ?? '').split(',').filter(Boolean).map(id => {
+            const seasonId = parseInt(id, 10);
+            const name = seasonsById.get(seasonId) ?? `Season ${seasonId}`;
+            return (
+              <span key={id} className="bg-blue-100 text-blue-700 px-1.5 rounded-full font-medium">
+                {name}
+              </span>
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
 
-export function AchievementChecklist({ allAchievements, unlockedIds, unlockedDetails }: AchievementChecklistProps) {
+export function AchievementChecklist({ allAchievements, unlockedIds, unlockedDetails, seasonUnlockedCount = 0 }: AchievementChecklistProps) {
+  const { seasons, seasonView } = useSelectedGame();
+  const seasonsById = new Map(seasons.map(s => [s.id as number, s.name]));
   // Group achievements by category for visual separation
   const categories = ['milestone', 'ranking', 'streak', 'special', 'time_based'] as const;
   const categoryLabels: Record<string, string> = {
@@ -97,8 +118,13 @@ export function AchievementChecklist({ allAchievements, unlockedIds, unlockedDet
         <span className="text-lg">📋</span>
         <span className="text-sm font-semibold text-gray-700 uppercase tracking-wide">All Achievements</span>
         <span className="text-xs text-gray-400 ml-1">
-          {unlockedIds.size}/{allAchievements.length} unlocked
+          {unlockedIds.size} earned across all seasons
         </span>
+        {seasonUnlockedCount > 0 && seasonView !== 'alltime' && (
+          <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">
+            {seasonUnlockedCount} {seasonView === 'current' ? 'this season' : `earned in ${seasons.find(s => s.id === seasonView)?.name ?? 'the selected season'}`}
+          </span>
+        )}
       </div>
 
       {categories.map((cat) => {
@@ -121,6 +147,7 @@ export function AchievementChecklist({ allAchievements, unlockedIds, unlockedDet
                     achievement={achievement}
                     isUnlocked={isUnlocked}
                     details={details}
+                    seasonsById={seasonsById}
                   />
                 );
               })}

@@ -1,13 +1,20 @@
 import db from './db';
 import { computeTimelineStats, parsePointTimeline, MARATHON_MINUTES } from './timeline';
+import { getSeason } from './seasons';
 
 export interface PunditryFact {
   type: string;
   player_id: number;
   player_name: string;
   description: string;
+  /** What the claim is about: 'all-time', a season name (e.g. 'Season 0'), or 'match'. */
+  scope?: string;
+  /** True when the fact sets/extends/breaks an all-time or seasonal record (A1). */
+  notable?: boolean;
   metadata?: Record<string, unknown>;
 }
+
+type Ledger = 'season' | 'alltime';
 
 interface MatchParticipant {
   player_id: number;
@@ -25,42 +32,44 @@ interface MatchInfo {
 }
 
 /**
- * Get player's highest Elo ever achieved in a game (before this match)
+ * Get player's highest Elo before this match ('season' = the match's season
+ * ledger, 'alltime' = the continuous ledger via the alltime_elo columns).
  */
-function getHighestEloBefore(playerId: number, gameId: number, seasonId: number, beforeMatchId: number): number | null {
-  // Elo reads are scoped to the match's own SEASON ledger
+function getHighestEloBefore(playerId: number, gameId: number, seasonId: number, beforeMatchId: number, ledger: Ledger = 'season'): number | null {
   const result = db.prepare(`
-    SELECT MAX(mp.elo_after) as highest
+    SELECT MAX(mp.${ledger === 'alltime' ? 'alltime_elo_after' : 'elo_after'}) as highest
     FROM match_participants mp
     JOIN matches m ON mp.match_id = m.id
-    WHERE mp.player_id = ? AND m.game_id = ? AND m.season_id = ? AND m.id < ?
-  `).get(playerId, gameId, seasonId, beforeMatchId) as { highest: number | null } | null;
+    WHERE mp.player_id = ? AND m.game_id = ?${ledger === 'alltime' ? '' : ' AND m.season_id = ?'} AND m.id < ?
+  `).get(...(ledger === 'alltime' ? [playerId, gameId, beforeMatchId] : [playerId, gameId, seasonId, beforeMatchId])) as { highest: number | null } | null;
   return result?.highest ?? null;
 }
 
 /**
- * Get player's lowest Elo ever in a game (before this match)
+ * Get player's lowest Elo before this match (ledger-scoped)
  */
-function getLowestEloBefore(playerId: number, gameId: number, seasonId: number, beforeMatchId: number): number | null {
+function getLowestEloBefore(playerId: number, gameId: number, seasonId: number, beforeMatchId: number, ledger: Ledger = 'season'): number | null {
   const result = db.prepare(`
-    SELECT MIN(mp.elo_after) as lowest
+    SELECT MIN(mp.${ledger === 'alltime' ? 'alltime_elo_after' : 'elo_after'}) as lowest
     FROM match_participants mp
     JOIN matches m ON mp.match_id = m.id
-    WHERE mp.player_id = ? AND m.game_id = ? AND m.season_id = ? AND m.id < ?
-  `).get(playerId, gameId, seasonId, beforeMatchId) as { lowest: number | null } | null;
+    WHERE mp.player_id = ? AND m.game_id = ?${ledger === 'alltime' ? '' : ' AND m.season_id = ?'} AND m.id < ?
+  `).get(...(ledger === 'alltime' ? [playerId, gameId, beforeMatchId] : [playerId, gameId, seasonId, beforeMatchId])) as { lowest: number | null } | null;
   return result?.lowest ?? null;
 }
 
 /**
- * Get player's biggest absolute Elo change before this match
+ * Get player's biggest absolute Elo change before this match (ledger-scoped)
  */
-function getBiggestEloChangeBefore(playerId: number, gameId: number, seasonId: number, beforeMatchId: number): number {
+function getBiggestEloChangeBefore(playerId: number, gameId: number, seasonId: number, beforeMatchId: number, ledger: Ledger = 'season'): number {
+  const after = ledger === 'alltime' ? 'mp.alltime_elo_after' : 'mp.elo_after';
+  const before = ledger === 'alltime' ? 'mp.alltime_elo_before' : 'mp.elo_before';
   const result = db.prepare(`
-    SELECT MAX(ABS(mp.elo_after - mp.elo_before)) as biggest
+    SELECT MAX(ABS(${after} - ${before})) as biggest
     FROM match_participants mp
     JOIN matches m ON mp.match_id = m.id
-    WHERE mp.player_id = ? AND m.game_id = ? AND m.season_id = ? AND m.id < ?
-  `).get(playerId, gameId, seasonId, beforeMatchId) as { biggest: number } | null;
+    WHERE mp.player_id = ? AND m.game_id = ?${ledger === 'alltime' ? '' : ' AND m.season_id = ?'} AND m.id < ?
+  `).get(...(ledger === 'alltime' ? [playerId, gameId, beforeMatchId] : [playerId, gameId, seasonId, beforeMatchId])) as { biggest: number } | null;
   return result?.biggest ?? 0;
 }
 
@@ -113,9 +122,10 @@ function getTotalWinsBefore(playerId: number, gameId: number, beforeMatchId: num
 }
 
 /**
- * Get match results for a player in chronological order (before this match)
+ * Get match results for a player in chronological order (before this match);
+ * optionally restricted to one season's slice of history.
  */
-function getMatchResultsBefore(playerId: number, gameId: number, beforeMatchId: number): { match_id: number; result: 'win' | 'loss' | 'draw' }[] {
+function getMatchResultsBefore(playerId: number, gameId: number, beforeMatchId: number, seasonId?: number): { match_id: number; result: 'win' | 'loss' | 'draw' }[] {
   const results = db.prepare(`
     SELECT
       mp.match_id,
@@ -123,9 +133,9 @@ function getMatchResultsBefore(playerId: number, gameId: number, beforeMatchId: 
       (SELECT MAX(mp2.score) FROM match_participants mp2 WHERE mp2.match_id = mp.match_id AND mp2.team != mp.team) as opponent_score
     FROM match_participants mp
     JOIN matches m ON mp.match_id = m.id
-    WHERE mp.player_id = ? AND m.game_id = ? AND m.id < ?
+    WHERE mp.player_id = ? AND m.game_id = ?${seasonId !== undefined ? ' AND m.season_id = ?' : ''} AND m.id < ?
     ORDER BY m.played_at ASC
-  `).all(playerId, gameId, beforeMatchId) as { match_id: number; score: number; opponent_score: number }[];
+  `).all(...(seasonId !== undefined ? [playerId, gameId, seasonId, beforeMatchId] : [playerId, gameId, beforeMatchId])) as { match_id: number; score: number; opponent_score: number }[];
 
   return results.map(r => ({
     match_id: r.match_id,
@@ -150,18 +160,81 @@ function getMatchesBetweenPlayersBefore(playerId1: number, playerId2: number, ga
 }
 
 /**
- * Get biggest absolute Elo change in a match between two players before this match
+ * Shared streak calculator: takes an ordered result list and returns current
+ * plus longest streaks per kind (win / lose / unbeaten).
  */
-function getBiggestEloChangeBetweenPlayersBefore(playerId1: number, playerId2: number, gameId: number, seasonId: number, beforeMatchId: number): number {
+function computeStreaks(results: ('win' | 'loss' | 'draw')[]) {
+  let longestWinStreak = 0;
+  let longestLoseStreak = 0;
+  let longestUnbeatenStreak = 0;
+  let currentWinStreak = 0;
+  let currentLoseStreak = 0;
+  let currentUnbeatenStreak = 0;
+  for (const r of results) {
+    if (r === 'win') {
+      currentWinStreak++;
+      currentLoseStreak = 0;
+      currentUnbeatenStreak++;
+      if (currentWinStreak > longestWinStreak) longestWinStreak = currentWinStreak;
+    } else if (r === 'loss') {
+      currentWinStreak = 0;
+      currentLoseStreak++;
+      currentUnbeatenStreak = 0;
+      if (currentLoseStreak > longestLoseStreak) longestLoseStreak = currentLoseStreak;
+    } else { // draw
+      currentWinStreak = 0;
+      currentLoseStreak = 0;
+      currentUnbeatenStreak++;
+    }
+    if (currentUnbeatenStreak > longestUnbeatenStreak) longestUnbeatenStreak = currentUnbeatenStreak;
+  }
+  return { longestWinStreak, longestLoseStreak, longestUnbeatenStreak, currentWinStreak, currentLoseStreak, currentUnbeatenStreak };
+}
+
+/**
+ * Emit a run-record fact only when this match beats the all-time or season
+ * record; one line names the scope it set (the other ledger is never
+ * mentioned — the chip/prose carries the record's own scope).
+ * All-time always wins when both are broken.
+ */
+function pushStreakRecord(
+  facts: PunditryFact[], type: string, playerId: number, playerName: string,
+  newLen: number, alltimeRecord: number, seasonRecord: number, minLen: number,
+  seasonName: string, describe: (len: number) => string
+) {
+  if (newLen < minLen) return;
+  let scope: string; let record: number;
+  if (newLen > alltimeRecord) {
+    scope = 'all-time'; record = alltimeRecord;
+  } else if (newLen > seasonRecord) {
+    scope = seasonName; record = seasonRecord;
+  } else return;
+  facts.push({
+    type,
+    player_id: playerId,
+    player_name: playerName,
+    scope,
+    notable: true,
+    description: `${describe(newLen)} (${scope === 'all-time' ? 'an all-time record' : `a ${scope} record`})`,
+    metadata: { streak_length: newLen, record_beaten: record }
+  });
+}
+
+/**
+ * Get biggest absolute Elo change in a match between two players before this match (ledger-scoped)
+ */
+function getBiggestEloChangeBetweenPlayersBefore(playerId1: number, playerId2: number, gameId: number, seasonId: number, beforeMatchId: number, ledger: Ledger = 'season'): number {
+  const after = ledger === 'alltime' ? 'mp1.alltime_elo_after' : 'mp1.elo_after';
+  const before = ledger === 'alltime' ? 'mp1.alltime_elo_before' : 'mp1.elo_before';
   const result = db.prepare(`
-    SELECT MAX(ABS(mp1.elo_after - mp1.elo_before)) as biggest
+    SELECT MAX(ABS(${after} - ${before})) as biggest
     FROM matches m
     JOIN match_participants mp1 ON m.id = mp1.match_id
     JOIN match_participants mp2 ON m.id = mp2.match_id
-    WHERE m.game_id = ? AND m.season_id = ? AND m.id < ?
+    WHERE m.game_id = ?${ledger === 'alltime' ? '' : ' AND m.season_id = ?'} AND m.id < ?
       AND mp1.player_id = ? AND mp2.player_id = ?
       AND mp1.team != mp2.team
-  `).get(gameId, seasonId, beforeMatchId, playerId1, playerId2) as { biggest: number } | null;
+  `).get(...(ledger === 'alltime' ? [gameId, beforeMatchId, playerId1, playerId2] : [gameId, seasonId, beforeMatchId, playerId1, playerId2])) as { biggest: number } | null;
   return result?.biggest ?? 0;
 }
 
@@ -182,9 +255,10 @@ function getPointsScoredAgainstBefore(playerId1: number, playerId2: number, game
 }
 
 /**
- * Get head-to-head match results between two players before this match
+ * Get head-to-head match results between two players before this match;
+ * optionally restricted to one season's slice.
  */
-function getHeadToHeadResultsBefore(playerId1: number, playerId2: number, gameId: number, beforeMatchId: number): { match_id: number; player1_score: number; player2_score: number }[] {
+function getHeadToHeadResultsBefore(playerId1: number, playerId2: number, gameId: number, beforeMatchId: number, seasonId?: number): { match_id: number; player1_score: number; player2_score: number }[] {
   return db.prepare(`
     SELECT
       m.id as match_id,
@@ -193,11 +267,11 @@ function getHeadToHeadResultsBefore(playerId1: number, playerId2: number, gameId
     FROM matches m
     JOIN match_participants mp1 ON m.id = mp1.match_id
     JOIN match_participants mp2 ON m.id = mp2.match_id
-    WHERE m.game_id = ? AND m.id < ?
+    WHERE m.game_id = ?${seasonId !== undefined ? ' AND m.season_id = ?' : ''} AND m.id < ?
       AND mp1.player_id = ? AND mp2.player_id = ?
       AND mp1.team != mp2.team
     ORDER BY m.played_at ASC
-  `).all(gameId, beforeMatchId, playerId1, playerId2) as { match_id: number; player1_score: number; player2_score: number }[];
+  `).all(...(seasonId !== undefined ? [gameId, seasonId, beforeMatchId, playerId1, playerId2] : [gameId, beforeMatchId, playerId1, playerId2])) as { match_id: number; player1_score: number; player2_score: number }[];
 }
 
 /**
@@ -214,6 +288,9 @@ export function getPunditryForMatch(matchId: number): PunditryFact[] {
   `).get(matchId) as { id: number; game_id: number; played_at: string; season_id: number; points_timeline: string | null } | null;
 
   if (!match) return facts;
+
+  // Season name for scope labels on season-ledger records (falls back when no row exists).
+  const seasonName = getSeason(match.season_id)?.name ?? `Season ${match.season_id}`;
 
   // Get participants
   const participants = db.prepare(`
@@ -252,41 +329,82 @@ export function getPunditryForMatch(matchId: number): PunditryFact[] {
   const playerNameMap = new Map(participants.map(p => [p.player_id, p.player_name]));
 
   for (const p of participants) {
-    // 1. Highest ever skill
-    const highestBefore = getHighestEloBefore(p.player_id, match.game_id, match.season_id, matchId);
-    if (highestBefore === null || p.elo_after > highestBefore) {
+    // 1. Highest ever skill — one line named by the scope it set (all-time wins over season)
+    const highestBeforeAlltime = getHighestEloBefore(p.player_id, match.game_id, match.season_id, matchId, 'alltime');
+    const highestBeforeSeason = getHighestEloBefore(p.player_id, match.game_id, match.season_id, matchId, 'season');
+    if (highestBeforeAlltime === null || p.elo_after > highestBeforeAlltime) {
       facts.push({
         type: 'highest_skill',
         player_id: p.player_id,
         player_name: playerNameMap.get(p.player_id) ?? '',
-        description: `That match puts ${playerNameMap.get(p.player_id)} on their highest ever skill (${p.elo_after.toFixed(1)})`,
+        scope: 'all-time',
+        notable: true,
+        description: `That match puts ${playerNameMap.get(p.player_id)} on their all-time highest skill (${p.elo_after.toFixed(1)}) (an all-time record)`,
+        metadata: { elo: p.elo_after }
+      });
+    } else if (highestBeforeSeason === null || p.elo_after > highestBeforeSeason) {
+      facts.push({
+        type: 'highest_skill',
+        player_id: p.player_id,
+        player_name: playerNameMap.get(p.player_id) ?? '',
+        scope: seasonName,
+        notable: true,
+        description: `That match puts ${playerNameMap.get(p.player_id)} on their highest skill (${p.elo_after.toFixed(1)}) (a ${seasonName} record)`,
         metadata: { elo: p.elo_after }
       });
     }
 
-    // 2. Lowest ever skill
-    const lowestBefore = getLowestEloBefore(p.player_id, match.game_id, match.season_id, matchId);
-    if (lowestBefore === null || p.elo_after < lowestBefore) {
+    // 2. Lowest ever skill — same dual-scope rule
+    const lowestBeforeAlltime = getLowestEloBefore(p.player_id, match.game_id, match.season_id, matchId, 'alltime');
+    const lowestBeforeSeason = getLowestEloBefore(p.player_id, match.game_id, match.season_id, matchId, 'season');
+    if (lowestBeforeAlltime === null || p.elo_after < lowestBeforeAlltime) {
       facts.push({
         type: 'lowest_skill',
         player_id: p.player_id,
         player_name: playerNameMap.get(p.player_id) ?? '',
-        description: `That match puts ${playerNameMap.get(p.player_id)} on their lowest ever skill (${p.elo_after.toFixed(1)})`,
+        scope: 'all-time',
+        notable: true,
+        description: `That match puts ${playerNameMap.get(p.player_id)} on their all-time lowest skill (${p.elo_after.toFixed(1)}) (an all-time record)`,
+        metadata: { elo: p.elo_after }
+      });
+    } else if (lowestBeforeSeason === null || p.elo_after < lowestBeforeSeason) {
+      facts.push({
+        type: 'lowest_skill',
+        player_id: p.player_id,
+        player_name: playerNameMap.get(p.player_id) ?? '',
+        scope: seasonName,
+        notable: true,
+        description: `That match puts ${playerNameMap.get(p.player_id)} on their lowest skill (${p.elo_after.toFixed(1)}) (a ${seasonName} record)`,
         metadata: { elo: p.elo_after }
       });
     }
 
-    // 3. Most significant match (biggest skill gain/loss)
+    // 3. Most significant match (biggest skill gain/loss) — dual scope
     const eloChange = Math.abs(p.elo_after - p.elo_before);
-    const biggestBefore = getBiggestEloChangeBefore(p.player_id, match.game_id, match.season_id, matchId);
-    if (eloChange > biggestBefore && biggestBefore > 0) {
+    const biggestBeforeAlltime = getBiggestEloChangeBefore(p.player_id, match.game_id, match.season_id, matchId, 'alltime');
+    const biggestBeforeSeason = getBiggestEloChangeBefore(p.player_id, match.game_id, match.season_id, matchId, 'season');
+    if (eloChange > biggestBeforeAlltime && biggestBeforeAlltime > 0) {
       const change = p.elo_after - p.elo_before;
       const direction = change > 0 ? 'gain' : 'loss';
       facts.push({
         type: 'biggest_match',
         player_id: p.player_id,
         player_name: playerNameMap.get(p.player_id) ?? '',
-        description: `That was ${playerNameMap.get(p.player_id)}'s most significant match (${Math.abs(change).toFixed(1)} skill ${direction})`,
+        scope: 'all-time',
+        notable: true,
+        description: `That was ${playerNameMap.get(p.player_id)}'s most significant match of all time (${Math.abs(change).toFixed(1)} skill ${direction}) (an all-time record)`,
+        metadata: { change: eloChange }
+      });
+    } else if (eloChange > biggestBeforeSeason && biggestBeforeSeason > 0) {
+      const change = p.elo_after - p.elo_before;
+      const direction = change > 0 ? 'gain' : 'loss';
+      facts.push({
+        type: 'biggest_match',
+        player_id: p.player_id,
+        player_name: playerNameMap.get(p.player_id) ?? '',
+        scope: seasonName,
+        notable: true,
+        description: `That was ${playerNameMap.get(p.player_id)}'s most significant match this season (${Math.abs(change).toFixed(1)} skill ${direction}) (a ${seasonName} record)`,
         metadata: { change: eloChange }
       });
     }
@@ -333,108 +451,70 @@ export function getPunditryForMatch(matchId: number): PunditryFact[] {
       }
     }
 
-    // 8 & 9. Streak calculations
-    const matchResults = getMatchResultsBefore(p.player_id, match.game_id, matchId);
-
-    // Calculate longest streaks before this match
-    let longestWinStreak = 0;
-    let longestLoseStreak = 0;
-    let longestUnbeatenStreak = 0;
-    let currentWinStreak = 0;
-    let currentLoseStreak = 0;
-    let currentUnbeatenStreak = 0;
-
-    for (const r of matchResults) {
-      if (r.result === 'win') {
-        currentWinStreak++;
-        currentLoseStreak = 0;
-        currentUnbeatenStreak++;
-        if (currentWinStreak > longestWinStreak) longestWinStreak = currentWinStreak;
-      } else if (r.result === 'loss') {
-        currentWinStreak = 0;
-        currentLoseStreak++;
-        currentUnbeatenStreak = 0;
-        if (currentLoseStreak > longestLoseStreak) longestLoseStreak = currentLoseStreak;
-      } else { // draw
-        currentWinStreak = 0;
-        currentLoseStreak = 0;
-        currentUnbeatenStreak++;
-      }
-      if (currentUnbeatenStreak > longestUnbeatenStreak) longestUnbeatenStreak = currentUnbeatenStreak;
-    }
-
-    // Current streak before this match
-    const streakBefore = {
-      win: currentWinStreak,
-      lose: currentLoseStreak,
-      unbeaten: currentUnbeatenStreak
-    };
+    // 8 & 9. Streak calculations — computed on BOTH ledgers; a record line
+    // names the scope it set (all-time wins over season when both are broken)
+    const alltimeStreaks = computeStreaks(getMatchResultsBefore(p.player_id, match.game_id, matchId).map(r => r.result));
+    const seasonStreaks = computeStreaks(getMatchResultsBefore(p.player_id, match.game_id, matchId, match.season_id).map(r => r.result));
 
     // Current result
     const currentResult = p.score > opponentScore ? 'win' as const : p.score < opponentScore ? 'loss' as const : 'draw' as const;
 
     // New streak lengths after this match
     const newStreak = {
-      win: currentResult === 'win' ? streakBefore.win + 1 : 0,
-      lose: currentResult === 'loss' ? streakBefore.lose + 1 : 0,
-      unbeaten: currentResult !== 'loss' ? streakBefore.unbeaten + 1 : 0
+      win: currentResult === 'win' ? alltimeStreaks.currentWinStreak + 1 : 0,
+      lose: currentResult === 'loss' ? alltimeStreaks.currentLoseStreak + 1 : 0,
+      unbeaten: currentResult !== 'loss' ? alltimeStreaks.currentUnbeatenStreak + 1 : 0
     };
 
-    // 8. Longest streak milestone
-    if (newStreak.win > longestWinStreak && newStreak.win >= 3) {
-      facts.push({
-        type: 'longest_win_streak',
-        player_id: p.player_id,
-        player_name: playerNameMap.get(p.player_id) ?? '',
-        description: `That match hit a longest win streak milestone for ${playerNameMap.get(p.player_id)} (${newStreak.win} wins)`,
-        metadata: { streak_length: newStreak.win }
-      });
-    }
-    if (newStreak.lose > longestLoseStreak && newStreak.lose >= 3) {
-      facts.push({
-        type: 'longest_lose_streak',
-        player_id: p.player_id,
-        player_name: playerNameMap.get(p.player_id) ?? '',
-        description: `That match hit a longest losing streak milestone for ${playerNameMap.get(p.player_id)} (${newStreak.lose} losses)`,
-        metadata: { streak_length: newStreak.lose }
-      });
-    }
-    if (newStreak.unbeaten > longestUnbeatenStreak && newStreak.unbeaten >= 5) {
-      facts.push({
-        type: 'longest_unbeaten_streak',
-        player_id: p.player_id,
-        player_name: playerNameMap.get(p.player_id) ?? '',
-        description: `That match hit a longest unbeaten streak milestone for ${playerNameMap.get(p.player_id)} (${newStreak.unbeaten} unbeaten)`,
-        metadata: { streak_length: newStreak.unbeaten }
-      });
-    }
+    // 8. Longest streak milestone (≥3 wins/losses, ≥5 unbeaten)
+    pushStreakRecord(
+      facts, 'longest_win_streak', p.player_id, playerNameMap.get(p.player_id) ?? '',
+      newStreak.win, alltimeStreaks.longestWinStreak, seasonStreaks.longestWinStreak, 3, seasonName,
+      (len) => `That match hit a longest win streak milestone for ${playerNameMap.get(p.player_id)} (${len} wins)`
+    );
+    pushStreakRecord(
+      facts, 'longest_lose_streak', p.player_id, playerNameMap.get(p.player_id) ?? '',
+      newStreak.lose, alltimeStreaks.longestLoseStreak, seasonStreaks.longestLoseStreak, 3, seasonName,
+      (len) => `That match hit a longest losing streak milestone for ${playerNameMap.get(p.player_id)} (${len} losses)`
+    );
+    pushStreakRecord(
+      facts, 'longest_unbeaten_streak', p.player_id, playerNameMap.get(p.player_id) ?? '',
+      newStreak.unbeaten, alltimeStreaks.longestUnbeatenStreak, seasonStreaks.longestUnbeatenStreak, 5, seasonName,
+      (len) => `That match hit a longest unbeaten streak milestone for ${playerNameMap.get(p.player_id)} (${len} unbeaten)`
+    );
 
-    // 9. Streak broken
-    if (streakBefore.win >= 3 && currentResult !== 'win') {
+    // 9. Streak broken — the streak that ended is a fact of the all-time ledger
+    if (alltimeStreaks.currentWinStreak >= 3 && currentResult !== 'win') {
       facts.push({
         type: 'win_streak_broken',
         player_id: p.player_id,
         player_name: playerNameMap.get(p.player_id) ?? '',
-        description: `That match broke ${playerNameMap.get(p.player_id)}'s ${streakBefore.win}-game winning streak`,
-        metadata: { streak_length: streakBefore.win }
+        scope: 'all-time',
+        notable: true,
+        description: `That match broke ${playerNameMap.get(p.player_id)}'s ${alltimeStreaks.currentWinStreak}-game winning streak`,
+        metadata: { streak_length: alltimeStreaks.currentWinStreak }
       });
     }
-    if (streakBefore.lose >= 3 && currentResult !== 'loss') {
+    if (alltimeStreaks.currentLoseStreak >= 3 && currentResult !== 'loss') {
       facts.push({
         type: 'lose_streak_broken',
         player_id: p.player_id,
         player_name: playerNameMap.get(p.player_id) ?? '',
-        description: `That match ended ${playerNameMap.get(p.player_id)}'s ${streakBefore.lose}-game losing streak`,
-        metadata: { streak_length: streakBefore.lose }
+        scope: 'all-time',
+        notable: true,
+        description: `That match ended ${playerNameMap.get(p.player_id)}'s ${alltimeStreaks.currentLoseStreak}-game losing streak`,
+        metadata: { streak_length: alltimeStreaks.currentLoseStreak }
       });
     }
-    if (streakBefore.unbeaten >= 5 && currentResult === 'loss') {
+    if (alltimeStreaks.currentUnbeatenStreak >= 5 && currentResult === 'loss') {
       facts.push({
         type: 'unbeaten_streak_broken',
         player_id: p.player_id,
         player_name: playerNameMap.get(p.player_id) ?? '',
-        description: `That match ended ${playerNameMap.get(p.player_id)}'s ${streakBefore.unbeaten}-game unbeaten run`,
-        metadata: { streak_length: streakBefore.unbeaten }
+        scope: 'all-time',
+        notable: true,
+        description: `That match ended ${playerNameMap.get(p.player_id)}'s ${alltimeStreaks.currentUnbeatenStreak}-game unbeaten run`,
+        metadata: { streak_length: alltimeStreaks.currentUnbeatenStreak }
       });
     }
   }
@@ -478,22 +558,34 @@ export function getPunditryForMatch(matchId: number): PunditryFact[] {
 
           if (!playerParticipant || !opponentParticipant) continue;
 
-          // Head-to-head: Most significant game between players
+          // Head-to-head: Most significant game between players — dual scope
           const eloChange = Math.abs(playerParticipant.elo_after - playerParticipant.elo_before);
-          const biggestBefore = getBiggestEloChangeBetweenPlayersBefore(playerId, opponentId, match.game_id, match.season_id, matchId);
-          if (eloChange > biggestBefore && biggestBefore > 0) {
+          const biggestBeforeAlltime = getBiggestEloChangeBetweenPlayersBefore(playerId, opponentId, match.game_id, match.season_id, matchId, 'alltime');
+          const biggestBeforeSeason = getBiggestEloChangeBetweenPlayersBefore(playerId, opponentId, match.game_id, match.season_id, matchId, 'season');
+          if (eloChange > biggestBeforeAlltime && biggestBeforeAlltime > 0 && playerId < opponentId) {
             const change = playerParticipant.elo_after - playerParticipant.elo_before;
             const direction = change > 0 ? 'gain' : 'loss';
-            // Only add once per pair
-            if (playerId < opponentId) {
-              facts.push({
-                type: 'h2h_biggest_match',
-                player_id: playerId,
-                player_name: playerNameMap.get(playerId) ?? '',
-                description: `That was the most significant match between ${playerNameMap.get(playerId)} and ${playerNameMap.get(opponentId)} (${Math.abs(change).toFixed(1)} skill ${direction} for ${playerNameMap.get(playerId)})`,
-                metadata: { opponent_id: opponentId, opponent_name: playerNameMap.get(opponentId), change: eloChange }
-              });
-            }
+            facts.push({
+              type: 'h2h_biggest_match',
+              player_id: playerId,
+              player_name: playerNameMap.get(playerId) ?? '',
+              scope: 'all-time',
+              notable: true,
+              description: `That was the most significant match ever between ${playerNameMap.get(playerId)} and ${playerNameMap.get(opponentId)} (${Math.abs(change).toFixed(1)} skill ${direction} for ${playerNameMap.get(playerId)}) (an all-time record)`,
+              metadata: { opponent_id: opponentId, opponent_name: playerNameMap.get(opponentId), change: eloChange }
+            });
+          } else if (eloChange > biggestBeforeSeason && biggestBeforeSeason > 0 && playerId < opponentId) {
+            const change = playerParticipant.elo_after - playerParticipant.elo_before;
+            const direction = change > 0 ? 'gain' : 'loss';
+            facts.push({
+              type: 'h2h_biggest_match',
+              player_id: playerId,
+              player_name: playerNameMap.get(playerId) ?? '',
+              scope: seasonName,
+              notable: true,
+              description: `That was the most significant match between ${playerNameMap.get(playerId)} and ${playerNameMap.get(opponentId)} this season (${Math.abs(change).toFixed(1)} skill ${direction} for ${playerNameMap.get(playerId)}) (a ${seasonName} record)`,
+              metadata: { opponent_id: opponentId, opponent_name: playerNameMap.get(opponentId), change: eloChange }
+            });
           }
 
           // Head-to-head: Points scored milestone against opponent
@@ -522,35 +614,11 @@ export function getPunditryForMatch(matchId: number): PunditryFact[] {
             });
           }
 
-          // Head-to-head: Streak calculations
-          const h2hResults = getHeadToHeadResultsBefore(playerId, opponentId, match.game_id, matchId);
-
-          // Calculate streaks from player's perspective
-          let h2hWinStreak = 0;
-          let h2hLoseStreak = 0;
-          let h2hUnbeatenStreak = 0;
-          let longestH2HWinStreak = 0;
-          let longestH2HLoseStreak = 0;
-          let longestH2HUnbeatenStreak = 0;
-
-          for (const r of h2hResults) {
-            if (r.player1_score > r.player2_score) {
-              h2hWinStreak++;
-              h2hLoseStreak = 0;
-              h2hUnbeatenStreak++;
-              if (h2hWinStreak > longestH2HWinStreak) longestH2HWinStreak = h2hWinStreak;
-            } else if (r.player1_score < r.player2_score) {
-              h2hWinStreak = 0;
-              h2hLoseStreak++;
-              h2hUnbeatenStreak = 0;
-              if (h2hLoseStreak > longestH2HLoseStreak) longestH2HLoseStreak = h2hLoseStreak;
-            } else {
-              h2hWinStreak = 0;
-              h2hLoseStreak = 0;
-              h2hUnbeatenStreak++;
-            }
-            if (h2hUnbeatenStreak > longestH2HUnbeatenStreak) longestH2HUnbeatenStreak = h2hUnbeatenStreak;
-          }
+          // Head-to-head: Streak calculations — both ledgers; a record line names its scope
+          const alltimeH2HStreaks = computeStreaks(getHeadToHeadResultsBefore(playerId, opponentId, match.game_id, matchId).map(r =>
+            r.player1_score > r.player2_score ? 'win' as const : r.player1_score < r.player2_score ? 'loss' as const : 'draw' as const));
+          const seasonH2HStreaks = computeStreaks(getHeadToHeadResultsBefore(playerId, opponentId, match.game_id, matchId, match.season_id).map(r =>
+            r.player1_score > r.player2_score ? 'win' as const : r.player1_score < r.player2_score ? 'loss' as const : 'draw' as const));
 
           // Current result from player's perspective
           const playerScore = playerParticipant.score;
@@ -558,65 +626,67 @@ export function getPunditryForMatch(matchId: number): PunditryFact[] {
           const h2hCurrentResult = playerScore > opponentScore ? 'win' as const : playerScore < opponentScore ? 'loss' as const : 'draw' as const;
 
           // New streak lengths
-          const newH2HWinStreak = h2hCurrentResult === 'win' ? h2hWinStreak + 1 : 0;
-          const newH2HLoseStreak = h2hCurrentResult === 'loss' ? h2hLoseStreak + 1 : 0;
-          const newH2HUnbeatenStreak = h2hCurrentResult !== 'loss' ? h2hUnbeatenStreak + 1 : 0;
+          const newH2HWinStreak = h2hCurrentResult === 'win' ? alltimeH2HStreaks.currentWinStreak + 1 : 0;
+          const newH2HLoseStreak = h2hCurrentResult === 'loss' ? alltimeH2HStreaks.currentLoseStreak + 1 : 0;
+          const newH2HUnbeatenStreak = h2hCurrentResult !== 'loss' ? alltimeH2HStreaks.currentUnbeatenStreak + 1 : 0;
 
           // Head-to-head: Longest streak milestone (minimum 3 for win/loss, 5 for unbeaten)
-          if (newH2HWinStreak > longestH2HWinStreak && newH2HWinStreak >= 3) {
-            facts.push({
-              type: 'h2h_longest_win_streak',
-              player_id: playerId,
-              player_name: playerNameMap.get(playerId) ?? '',
-              description: `That match set a new longest winning streak for ${playerNameMap.get(playerId)} against ${playerNameMap.get(opponentId)} (${newH2HWinStreak} wins)`,
-              metadata: { opponent_id: opponentId, opponent_name: playerNameMap.get(opponentId), streak_length: newH2HWinStreak }
-            });
-          }
-          if (newH2HLoseStreak > longestH2HLoseStreak && newH2HLoseStreak >= 3) {
-            facts.push({
-              type: 'h2h_longest_lose_streak',
-              player_id: playerId,
-              player_name: playerNameMap.get(playerId) ?? '',
-              description: `That match set a new longest losing streak for ${playerNameMap.get(playerId)} against ${playerNameMap.get(opponentId)} (${newH2HLoseStreak} losses)`,
-              metadata: { opponent_id: opponentId, opponent_name: playerNameMap.get(opponentId), streak_length: newH2HLoseStreak }
-            });
-          }
-          if (newH2HUnbeatenStreak > longestH2HUnbeatenStreak && newH2HUnbeatenStreak >= 5) {
-            facts.push({
-              type: 'h2h_longest_unbeaten_streak',
-              player_id: playerId,
-              player_name: playerNameMap.get(playerId) ?? '',
-              description: `That match set a new longest unbeaten run for ${playerNameMap.get(playerId)} against ${playerNameMap.get(opponentId)} (${newH2HUnbeatenStreak} unbeaten)`,
-              metadata: { opponent_id: opponentId, opponent_name: playerNameMap.get(opponentId), streak_length: newH2HUnbeatenStreak }
-            });
-          }
+          const h2hPusher = (type: string, newLen: number, alltimeRecord: number, seasonRecord: number, minLen: number, describe: (len: number) => string) => {
+            if (newLen >= minLen) {
+              let scope, record;
+              if (newLen > alltimeRecord) { scope = 'all-time'; record = alltimeRecord; }
+              else if (newLen > seasonRecord) { scope = seasonName; record = seasonRecord; }
+              else return;
+              facts.push({
+                type,
+                player_id: playerId,
+                player_name: playerNameMap.get(playerId) ?? '',
+                scope,
+                notable: true,
+                description: `${describe(newLen)} (${scope === 'all-time' ? 'an all-time record' : `a ${scope} record`})`,
+                metadata: { opponent_id: opponentId, opponent_name: playerNameMap.get(opponentId), streak_length: newLen, record_beaten: record }
+              });
+            }
+          };
+          h2hPusher('h2h_longest_win_streak', newH2HWinStreak, alltimeH2HStreaks.longestWinStreak, seasonH2HStreaks.longestWinStreak, 3,
+            (len) => `That match set a new longest winning streak for ${playerNameMap.get(playerId)} against ${playerNameMap.get(opponentId)} (${len} wins)`);
+          h2hPusher('h2h_longest_lose_streak', newH2HLoseStreak, alltimeH2HStreaks.longestLoseStreak, seasonH2HStreaks.longestLoseStreak, 3,
+            (len) => `That match set a new longest losing streak for ${playerNameMap.get(playerId)} against ${playerNameMap.get(opponentId)} (${len} losses)`);
+          h2hPusher('h2h_longest_unbeaten_streak', newH2HUnbeatenStreak, alltimeH2HStreaks.longestUnbeatenStreak, seasonH2HStreaks.longestUnbeatenStreak, 5,
+            (len) => `That match set a new longest unbeaten run for ${playerNameMap.get(playerId)} against ${playerNameMap.get(opponentId)} (${len} unbeaten)`);
 
-          // Head-to-head: Streak broken
-          if (h2hWinStreak >= 3 && h2hCurrentResult !== 'win') {
+          // Head-to-head: Streak broken — the streak that ended is a fact of the all-time ledger
+          if (alltimeH2HStreaks.currentWinStreak >= 3 && h2hCurrentResult !== 'win') {
             facts.push({
               type: 'h2h_win_streak_broken',
               player_id: playerId,
               player_name: playerNameMap.get(playerId) ?? '',
-              description: `That match ended ${playerNameMap.get(playerId)}'s ${h2hWinStreak}-game winning streak against ${playerNameMap.get(opponentId)}`,
-              metadata: { opponent_id: opponentId, opponent_name: playerNameMap.get(opponentId), streak_length: h2hWinStreak }
+              scope: 'all-time',
+              notable: true,
+              description: `That match ended ${playerNameMap.get(playerId)}'s ${alltimeH2HStreaks.currentWinStreak}-game winning streak against ${playerNameMap.get(opponentId)}`,
+              metadata: { opponent_id: opponentId, opponent_name: playerNameMap.get(opponentId), streak_length: alltimeH2HStreaks.currentWinStreak }
             });
           }
-          if (h2hLoseStreak >= 3 && h2hCurrentResult !== 'loss') {
+          if (alltimeH2HStreaks.currentLoseStreak >= 3 && h2hCurrentResult !== 'loss') {
             facts.push({
               type: 'h2h_lose_streak_broken',
               player_id: playerId,
               player_name: playerNameMap.get(playerId) ?? '',
-              description: `That match ended ${playerNameMap.get(playerId)}'s ${h2hLoseStreak}-game losing streak against ${playerNameMap.get(opponentId)}`,
-              metadata: { opponent_id: opponentId, opponent_name: playerNameMap.get(opponentId), streak_length: h2hLoseStreak }
+              scope: 'all-time',
+              notable: true,
+              description: `That match ended ${playerNameMap.get(playerId)}'s ${alltimeH2HStreaks.currentLoseStreak}-game losing streak against ${playerNameMap.get(opponentId)}`,
+              metadata: { opponent_id: opponentId, opponent_name: playerNameMap.get(opponentId), streak_length: alltimeH2HStreaks.currentLoseStreak }
             });
           }
-          if (h2hUnbeatenStreak >= 5 && h2hCurrentResult === 'loss') {
+          if (alltimeH2HStreaks.currentUnbeatenStreak >= 5 && h2hCurrentResult === 'loss') {
             facts.push({
               type: 'h2h_unbeaten_streak_broken',
               player_id: playerId,
               player_name: playerNameMap.get(playerId) ?? '',
-              description: `That match ended ${playerNameMap.get(playerId)}'s ${h2hUnbeatenStreak}-game unbeaten run against ${playerNameMap.get(opponentId)}`,
-              metadata: { opponent_id: opponentId, opponent_name: playerNameMap.get(opponentId), streak_length: h2hUnbeatenStreak }
+              scope: 'all-time',
+              notable: true,
+              description: `That match ended ${playerNameMap.get(playerId)}'s ${alltimeH2HStreaks.currentUnbeatenStreak}-game unbeaten run against ${playerNameMap.get(opponentId)}`,
+              metadata: { opponent_id: opponentId, opponent_name: playerNameMap.get(opponentId), streak_length: alltimeH2HStreaks.currentUnbeatenStreak }
             });
           }
         }
@@ -707,5 +777,50 @@ export function getPunditryForMatch(matchId: number): PunditryFact[] {
     }
   }
 
-  return facts;
+  // ===== ROLLUP (DD-0001 / A1 revision, generalized after live review) =====
+  //
+  // Run facts — record extensions AND broken-streak facts, solo AND h2h —
+  // are faces of the same coin: one run story per player per match. Keep the
+  // headline (all-time over season record, then record-set over
+  // streak-ended, then solo over h2h, then win over lose over unbeaten) and
+  // drop the rest.
+  const RUN_FACT_TYPES = new Set([
+    'longest_win_streak', 'longest_lose_streak', 'longest_unbeaten_streak',
+    'h2h_longest_win_streak', 'h2h_longest_lose_streak', 'h2h_longest_unbeaten_streak',
+    'win_streak_broken', 'lose_streak_broken', 'unbeaten_streak_broken',
+    'h2h_win_streak_broken', 'h2h_lose_streak_broken', 'h2h_unbeaten_streak_broken',
+  ]);
+  const runGroups = new Map<string, { index: number; score: number }[]>();
+  facts.forEach((f, index) => {
+    if (!RUN_FACT_TYPES.has(f.type)) return;
+    const isRecord = f.type.includes('longest');
+    const isH2H = f.type.startsWith('h2h_');
+    // h2h run facts are mirrors (a loss for A against B is a win for B against
+    // A), so the coin group is the unordered PAIR, not one player's side.
+    const key = isH2H
+      ? `h2h:${[f.player_id, (f.metadata?.opponent_id ?? 0) as number].sort((a, b) => a - b).join(':')}`
+      : `solo:${f.player_id}`;
+    const score = (f.scope === 'all-time' ? 100 : 0)
+      + (isRecord ? 10 : 0)
+      + (isH2H ? 0 : 1)
+      + (f.type.includes('win') ? 3 : f.type.includes('lose') ? 2 : 1);
+    const group = runGroups.get(key) ?? [];
+    group.push({ index, score });
+    runGroups.set(key, group);
+  });
+  const droppedIndexes = new Set<number>();
+  for (const group of runGroups.values()) {
+    if (group.length < 2) continue;
+    const keep = group.reduce((best, g) => (g.score > best.score ? g : best), group[0]);
+    for (const g of group) {
+      if (g.index !== keep.index) droppedIndexes.add(g.index);
+    }
+  }
+
+  return facts.filter((f, index) => !droppedIndexes.has(index)).map(f => ({
+    ...f,
+    // Defaults for facts whose scope/notable is structural (milestones, timeline events)
+    scope: f.scope ?? (f.type.includes('milestone') ? 'all-time' : 'match'),
+    notable: f.notable ?? false,
+  }));
 }
