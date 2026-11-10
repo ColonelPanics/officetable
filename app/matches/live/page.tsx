@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback, Suspense } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useSelectedGame } from "@/lib/hooks/useSelectedGame";
@@ -42,11 +42,15 @@ interface LiveDraft {
   startedAt: string;
   finishedAt: string | null;
   events: PointTimelineEvent[];
+  /** Google Chat thread this live match posts into (set at kick off). */
+  chatThreadKey?: string | null;
+  /** Whether Chat updates were requested (default true). */
+  chatEnabled?: boolean;
 }
 
 const DRAFT_KEY = 'liveMatchDraft.v1';
 
-type Phase = 'setup' | 'scoring' | 'review';
+type Phase = 'setup' | 'confirm' | 'scoring' | 'review';
 
 function LiveMatchContent() {
   const router = useRouter();
@@ -62,12 +66,19 @@ function LiveMatchContent() {
   const [error, setError] = useState<string | null>(null);
   const [phase, setPhase] = useState<Phase>('setup');
   const [events, setEvents] = useState<PointTimelineEvent[]>([]);
+  // Synchronous mirror of `events`: rapid taps batch React state, so the
+  // Chat goal message must read counts from here to always show the exact
+  // new running score. Keep in sync wherever setEvents is called.
+  const eventsRef = useRef<PointTimelineEvent[]>([]);
   const [startedAt, setStartedAt] = useState<string | null>(null);
   const [finishedAt, setFinishedAt] = useState<string | null>(null);
   // Ticks to recompute the elapsed clock every second while scoring.
   const [tick, setTick] = useState(0);
   const [resumed, setResumed] = useState(false);
   const [draftLoaded, setDraftLoaded] = useState(false);
+  // Live Google Chat updates: kickoff starts a thread, points reply into it.
+  const [chatEnabled, setChatEnabled] = useState(true);
+  const [chatThreadKey, setChatThreadKey] = useState<string | null>(null);
   // Open gamble matches for the selected game (rosters exposed so the
   // banner can match any team shape, either side order).
   const [openGambles, setOpenGambles] = useState<{
@@ -122,8 +133,11 @@ function LiveMatchContent() {
             setStartedAt(draft.startedAt);
             setFinishedAt(draft.finishedAt ?? null);
             setEvents(draft.events);
+            eventsRef.current = draft.events;
             setPhase(draft.finishedAt ? 'review' : 'scoring');
             setResumed(true);
+            setChatThreadKey(draft.chatThreadKey ?? null);
+            setChatEnabled(draft.chatEnabled ?? true);
           }
         }
       } catch {
@@ -145,19 +159,29 @@ function LiveMatchContent() {
       startedAt,
       finishedAt,
       events,
+      chatThreadKey,
+      chatEnabled,
     };
     try {
       localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
     } catch {
       // Storage full / unavailable — live tracking still works in memory
     }
-  }, [draftLoaded, startedAt, finishedAt, events, team1Players, team2Players, selectedGameId]);
+  }, [draftLoaded, startedAt, finishedAt, events, team1Players, team2Players, selectedGameId, chatThreadKey, chatEnabled]);
 
   useEffect(() => {
     if (!startedAt || finishedAt) return;
     const id = setInterval(() => setTick(t => t + 1), 1000);
     return () => clearInterval(id);
   }, [startedAt, finishedAt]);
+
+  // Setup → confirm: pause between picking players and the clock, so the
+  // matchup (game, target, both sides) can be checked and Chat updates
+  // toggled before anything starts.
+  const startMatch = useCallback(() => {
+    setResumed(false);
+    setPhase('confirm');
+  }, []);
 
   function togglePlayer(team: 1 | 2, playerId: number) {
     setResumed(false);
@@ -178,44 +202,32 @@ function LiveMatchContent() {
     }
   }
 
-  const startMatch = useCallback(() => {
-    setEvents([]);
-    setFinishedAt(null);
-    setStartedAt(new Date().toISOString());
-    setResumed(false);
-    setPhase('scoring');
-  }, []);
-
   const discard = useCallback(() => {
     if (!confirm('Discard this live match? The scored points will be lost.')) return;
     try { localStorage.removeItem(DRAFT_KEY); } catch { /* ignore */ }
     setEvents([]);
+    eventsRef.current = [];
     setStartedAt(null);
     setFinishedAt(null);
     setNotes("");
     setResumed(false);
+    setChatThreadKey(null);
     setPhase('setup');
   }, []);
 
-  /** Record a point for team index (0 | 1) at the CURRENT moment. */
-  const recordPoint = useCallback((teamIndex: 0 | 1) => {
-    if (!startedAt || finishedAt) return;
-    const at = Math.max(0, Date.now() - new Date(startedAt).getTime());
-    setEvents((prev) => [...prev, { team: teamIndex, at }]);
-  }, [startedAt, finishedAt]);
-
   const undoLast = useCallback(() => {
-    setEvents((prev) => prev.slice(0, -1));
+    setEvents((prev) => {
+      eventsRef.current = prev.slice(0, -1);
+      return eventsRef.current;
+    });
   }, []);
 
   const removeEvent = useCallback((index: number) => {
     if (!confirm('Remove this point from the record?')) return;
-    setEvents((prev) => prev.filter((_, i) => i !== index));
-  }, []);
-
-  const endMatch = useCallback(() => {
-    setFinishedAt(new Date().toISOString());
-    setPhase('review');
+    setEvents((prev) => {
+      eventsRef.current = prev.filter((_, i) => i !== index);
+      return eventsRef.current;
+    });
   }, []);
 
   // Scores derived FROM the events — always in sync with the point order
@@ -329,6 +341,83 @@ function LiveMatchContent() {
 
   const team1Name = team1Players.length === 1 ? (players.find(p => p.id === team1Players[0])?.name ?? 'Team 1') : `Team 1 (${team1Players.length})`;
   const team2Name = team2Players.length === 1 ? (players.find(p => p.id === team2Players[0])?.name ?? 'Team 2') : `Team 2 (${team2Players.length})`;
+
+  // ---- Live Chat updates ----
+  /** Fire-and-forget post into the match's Chat thread. A webhook failure
+   *  is logged server-side and never blocks scoring. */
+  const postLive = useCallback((body: Record<string, unknown>) => {
+    if (!chatThreadKey) return;
+    fetch('/api/live-chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...body, threadKey: chatThreadKey }),
+    }).catch(() => { /* offline — scoring continues */ });
+  }, [chatThreadKey]);
+
+  const beginMatch = useCallback(() => {
+    setEvents([]);
+    eventsRef.current = [];
+    setFinishedAt(null);
+    setChatThreadKey(null); // new match — new thread (replaced by kickoff response)
+    setStartedAt(new Date().toISOString());
+    setResumed(false);
+    setPhase('scoring');
+    if (chatEnabled) {
+      fetch('/api/live-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'start',
+          game: selectedGameData ? gameName(selectedGameData.name) : null,
+          targetHint,
+          redName: team1Name,
+          blueName: team2Name,
+        }),
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => { if (data?.threadKey) setChatThreadKey(data.threadKey); })
+        .catch(() => { /* offline — scoring continues */ });
+    }
+  }, [chatEnabled, selectedGameData, targetHint, team1Name, team2Name]);
+
+  /** Record a point for team index (0 | 1) at the CURRENT moment. */
+  const recordPoint = useCallback((teamIndex: 0 | 1) => {
+    if (!startedAt || finishedAt) return;
+    const at = Math.max(0, Date.now() - new Date(startedAt).getTime());
+    // Count from the sync mirror, not state — rapid taps batch renders.
+    const next = [...eventsRef.current, { team: teamIndex, at }];
+    eventsRef.current = next;
+    setEvents(next);
+    // Threaded Chat update: scorer + running score (fire-and-forget).
+    const s1 = next.reduce((n, e) => n + (e.team === 0 ? 1 : 0), 0);
+    const s2 = next.reduce((n, e) => n + (e.team === 1 ? 1 : 0), 0);
+    postLive({
+      action: 'goal',
+      scorer: teamIndex === 0 ? team1Name : team2Name,
+      score: `${s1}-${s2}`,
+      at: formatClock(at),
+    });
+  }, [startedAt, finishedAt, team1Name, team2Name, postLive]);
+
+  const endMatch = useCallback(() => {
+    setFinishedAt(new Date().toISOString());
+    setPhase('review');
+    // Threaded full-time line. The full result card still posts separately
+    // at Record time via the normal match notification.
+    if (startedAt) {
+      const end = endedAt ? new Date(endedAt).getTime() : Date.now();
+      // Mirror count: the end press can land in the same batch as the last point.
+      const s1 = eventsRef.current.reduce((n, e) => n + (e.team === 0 ? 1 : 0), 0);
+      const s2 = eventsRef.current.reduce((n, e) => n + (e.team === 1 ? 1 : 0), 0);
+      postLive({
+        action: 'final',
+        redName: team1Name,
+        blueName: team2Name,
+        score: `${s1}-${s2}`,
+        duration: formatDuration(Math.max(0, end - new Date(startedAt).getTime())),
+      });
+    }
+  }, [startedAt, endedAt, team1Name, team2Name, postLive]);
 
   // ============ SETUP ============
   if (phase === 'setup') {
@@ -453,7 +542,7 @@ function LiveMatchContent() {
           disabled={team1Players.length === 0 || team2Players.length === 0}
           className="w-full py-4 bg-primary text-white rounded-xl font-semibold text-lg hover:bg-primary-hover transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          🔴 Start scoring
+          🔴 Confirm teams & start
         </button>
 
         {team1Players.length === 0 || team2Players.length === 0 ? (
@@ -470,6 +559,81 @@ function LiveMatchContent() {
             </p>
           </div>
         )}
+      </div>
+    );
+  }
+
+  // ============ CONFIRM ============
+  // Deliberate pause between picking players and the clock: what game, what
+  // target, exactly who is on each side — and whether the Chat room follows.
+  if (phase === 'confirm') {
+    return (
+      <div className="max-w-md mx-auto">
+        <div className="text-center mb-6">
+          <h1 className="text-3xl font-bold mb-2">Ready to go?</h1>
+          <p className="text-gray-500 text-sm">The clock starts when you tap — check this is the right match first.</p>
+        </div>
+
+        <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-2xl p-5 mb-4 text-white">
+          <div className="text-center text-sm text-slate-400 mb-3">
+            {selectedGameData ? gameName(selectedGameData.name) : ''}{selectedGameData ? ' · ' : ''}{targetHint}
+          </div>
+          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3">
+            <div className="text-center">
+              <div className="text-xs font-semibold uppercase tracking-wide text-red-400 mb-2">Red</div>
+              {team1Players.map((playerId) => {
+                const player = players.find((p) => p.id === playerId);
+                return (
+                  <div key={playerId} className="flex items-center justify-center gap-1.5 py-1">
+                    <PlayerAvatar name={player?.name ?? ''} avatarUrl={player?.avatar_url} size={22} />
+                    <span className="text-sm font-medium truncate">{player?.name}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="w-10 h-10 rounded-full bg-slate-700 flex items-center justify-center text-xs font-bold text-slate-300">VS</div>
+            <div className="text-center">
+              <div className="text-xs font-semibold uppercase tracking-wide text-blue-400 mb-2">Blue</div>
+              {team2Players.map((playerId) => {
+                const player = players.find((p) => p.id === playerId);
+                return (
+                  <div key={playerId} className="flex items-center justify-center gap-1.5 py-1">
+                    <PlayerAvatar name={player?.name ?? ''} avatarUrl={player?.avatar_url} size={22} />
+                    <span className="text-sm font-medium truncate">{player?.name}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        <label className="flex items-start gap-3 mb-6 bg-card rounded-xl shadow-lg p-4 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={chatEnabled}
+            onChange={(e) => setChatEnabled(e.target.checked)}
+            className="w-5 h-5 mt-0.5 rounded border-gray-300 text-primary focus:ring-primary"
+          />
+          <span className="text-sm text-gray-700">
+            <span className="font-semibold">📣 Post live updates to the Chat room</span>
+            <span className="block text-xs text-gray-500 mt-1">Kick off, then a threaded update for every point and the final score.</span>
+          </span>
+        </label>
+
+        <button
+          type="button"
+          onClick={beginMatch}
+          className="w-full py-4 bg-primary text-white rounded-xl font-semibold text-lg hover:bg-primary-hover transition-all shadow-lg"
+        >
+          🔴 Start the clock
+        </button>
+        <button
+          type="button"
+          onClick={() => setPhase('setup')}
+          className="w-full py-3 mt-3 text-sm font-semibold text-gray-500 hover:text-gray-700 transition-colors"
+        >
+          ← Change teams
+        </button>
       </div>
     );
   }

@@ -226,16 +226,19 @@ function NewMatchContent() {
               : `First to ${selectedGameData.score_value} points`}
           </p>
         )}
-        <p className="text-sm text-gray-400 mt-2">
-          Playing right now?{' '}
-          <Link
-            href={selectedGameId ? `/matches/live?game=${selectedGameId}` : '/matches/live'}
-            className="text-red-600 hover:underline font-medium"
-          >
-            🔴 Track the match live
-          </Link>{' '}
-          for the scoring order, duration and comeback achievements.
-        </p>
+        <Link
+          href={selectedGameId ? `/matches/live?game=${selectedGameId}` : '/matches/live'}
+          className="block mt-4 p-5 bg-gradient-to-r from-red-50 to-amber-50 border-2 border-red-300 rounded-2xl hover:border-red-500 hover:shadow-lg transition-all group"
+        >
+          <div className="flex items-center justify-center gap-3">
+            <span className="text-3xl">🔴</span>
+            <div className="text-left">
+              <div className="font-bold text-red-700 group-hover:text-red-800">Playing it live right now? Track it live.</div>
+              <div className="text-sm text-gray-600">Point-by-point scoring, real match duration, comeback achievements and live Chat updates.</div>
+            </div>
+            <span className="text-red-500 font-bold text-xl group-hover:translate-x-0.5 transition-transform">→</span>
+          </div>
+        </Link>
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-6">
