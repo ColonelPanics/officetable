@@ -248,12 +248,30 @@ export function Nav() {
 
             <LiveChip />
 
-            <Link
-              href={selectedGameId !== null ? `/matches/new?game=${selectedGameId}` : '/matches/new'}
-              className="hidden sm:inline-flex px-4 py-2 text-sm font-semibold bg-primary text-white rounded-lg hover:bg-primary-hover transition-all shadow-sm hover:shadow-md"
-            >
-              + Record Match
-            </Link>
+            {/* Desktop theme toggle — the mobile row keeps its own (R4 actions) */}
+              <button
+                onClick={() => setColorMode(nextMode[currentMode])}
+                className="hidden sm:inline-flex p-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                title={`Current: ${modeLabel[currentMode]} — click to switch to ${modeLabel[nextMode[currentMode]].replace(' theme', '')}`}
+                aria-label={`Switch to ${nextMode[currentMode].replace(' theme', '')}`}
+              >
+                {!mounted ? (
+                  <span className="block w-5 h-5" aria-hidden>🌗</span>
+                ) : currentMode === 'dark' ? (
+                  <span className="block w-5 h-5" aria-hidden>🌙</span>
+                ) : currentMode === 'light' ? (
+                  <span className="block w-5 h-5" aria-hidden>☀️</span>
+                ) : (
+                  <span className="block w-5 h-5" aria-hidden>🌗</span>
+                )}
+              </button>
+
+              <Link
+                href={selectedGameId !== null ? `/matches/new?game=${selectedGameId}` : '/matches/new'}
+                className="hidden sm:inline-flex px-4 py-2 text-sm font-semibold bg-primary text-white rounded-lg hover:bg-primary-hover transition-all shadow-sm hover:shadow-md"
+              >
+                + Record Match
+              </Link>
 
             {/* Mobile: theme + burger — links unreachable otherwise */}
             <div className="flex items-center sm:hidden">
