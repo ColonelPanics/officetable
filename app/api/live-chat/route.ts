@@ -6,6 +6,25 @@ import { NextRequest, NextResponse } from 'next/server';
 // fresh key opens a thread, the same key posts each subsequent point as a
 // reply inside it.
 
+/** Per-sport goal emoji from the game name; 🏆 when unknown. */
+const SPORT_EMOJIS: [RegExp, string][] = [
+  [/table[- .]?tennis|ping[- .]?pong/, '🏓'],
+  [/pool|billiard|snooker/, '🎱'],
+  [/foosball|table[- .]?football/, '⚽'],
+  [/tennis|squash|badminton|racket/, '🎾'],
+  [/darts/, '🎯'],
+  [/hockey/, '🏒'],
+  [/football|soccer/, '⚽'],
+];
+
+function sportEmoji(game?: string | null): string {
+  const n = (game ?? '').toLowerCase();
+  for (const [pattern, emoji] of SPORT_EMOJIS) {
+    if (pattern.test(n)) return emoji;
+  }
+  return '🏆';
+}
+
 interface LiveChatBody {
   action: 'start' | 'goal' | 'final';
   threadKey?: string;
@@ -52,7 +71,7 @@ export async function POST(request: NextRequest) {
       text = `🔴 *LIVE* ${body.game ? body.game : 'Match'}${body.targetHint ? ` (${body.targetHint})` : ''} — *${red}* vs *${blue}*. Kick off!`;
       break;
     case 'goal':
-      text = `⚽ ${body.at ? `${body.at} — ` : ''}*${body.scorer ?? 'A side'}* scores → *${score}*`;
+      text = `${sportEmoji(body.game)} ${body.at ? `${body.at} — ` : ''}*${body.scorer ?? 'A side'}* scores → *${score}*`;
       break;
     case 'final':
       text = `🏁 *FULL TIME* ${red} ${score} ${blue}${body.duration ? ` · ${body.duration}` : ''}`;

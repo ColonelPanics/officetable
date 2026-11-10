@@ -393,11 +393,12 @@ function LiveMatchContent() {
     const s2 = next.reduce((n, e) => n + (e.team === 1 ? 1 : 0), 0);
     postLive({
       action: 'goal',
+      game: selectedGameData?.name ?? null,
       scorer: teamIndex === 0 ? team1Name : team2Name,
       score: `${s1}-${s2}`,
       at: formatClock(at),
     });
-  }, [startedAt, finishedAt, team1Name, team2Name, postLive]);
+  }, [startedAt, finishedAt, selectedGameData, team1Name, team2Name, postLive]);
 
   const endMatch = useCallback(() => {
     setFinishedAt(new Date().toISOString());
@@ -411,13 +412,14 @@ function LiveMatchContent() {
       const s2 = eventsRef.current.reduce((n, e) => n + (e.team === 1 ? 1 : 0), 0);
       postLive({
         action: 'final',
+        game: selectedGameData?.name ?? null,
         redName: team1Name,
         blueName: team2Name,
         score: `${s1}-${s2}`,
         duration: formatDuration(Math.max(0, end - new Date(startedAt).getTime())),
       });
     }
-  }, [startedAt, endedAt, team1Name, team2Name, postLive]);
+  }, [startedAt, endedAt, selectedGameData, team1Name, team2Name, postLive]);
 
   // ============ SETUP ============
   if (phase === 'setup') {
