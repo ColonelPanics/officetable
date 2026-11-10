@@ -22,6 +22,8 @@ interface MatchParticipant {
   score: number;
   elo_before: number;
   elo_after: number;
+  alltime_elo_before: number;
+  alltime_elo_after: number;
 }
 
 interface MatchInfo {
@@ -292,13 +294,21 @@ export function getPunditryForMatch(matchId: number): PunditryFact[] {
   // Season name for scope labels on season-ledger records (falls back when no row exists).
   const seasonName = getSeason(match.season_id)?.name ?? `Season ${match.season_id}`;
 
-  // Get participants
+  // Get participants — both ledgers (season `elo_*`, continuous `alltime_*`)
   const participants = db.prepare(`
-    SELECT mp.player_id, mp.team, mp.score, mp.elo_before, mp.elo_after, p.name as player_name
+    SELECT mp.player_id, mp.team, mp.score, mp.elo_before, mp.elo_after,
+      mp.alltime_elo_before, mp.alltime_elo_after, p.name as player_name
     FROM match_participants mp
     JOIN players p ON mp.player_id = p.id
     WHERE mp.match_id = ?
-  `).all(matchId) as { player_id: number; team: number; score: number; elo_before: number; elo_after: number; player_name: string }[];
+  `).all(matchId) as { player_id: number; team: number; score: number; elo_before: number; elo_after: number; alltime_elo_before: number; alltime_elo_after: number; player_name: string }[];
+
+  // Elo readings for a ledger: all-time claims must be recorded against the
+  // all-time ledger, not the match's season ledger
+  const ledgerElo = (p: MatchParticipant, ledger: Ledger) => ({
+    before: ledger === 'alltime' ? p.alltime_elo_before : p.elo_before,
+    after: ledger === 'alltime' ? p.alltime_elo_after : p.elo_after,
+  });
 
   // Get teams info
   const teamMap = new Map<number, { score: number; player_ids: number[] }>();
@@ -332,59 +342,64 @@ export function getPunditryForMatch(matchId: number): PunditryFact[] {
     // 1. Highest ever skill — one line named by the scope it set (all-time wins over season)
     const highestBeforeAlltime = getHighestEloBefore(p.player_id, match.game_id, match.season_id, matchId, 'alltime');
     const highestBeforeSeason = getHighestEloBefore(p.player_id, match.game_id, match.season_id, matchId, 'season');
-    if (highestBeforeAlltime === null || p.elo_after > highestBeforeAlltime) {
+    const atElo1 = ledgerElo(p, 'alltime').after;
+    const sElo1 = ledgerElo(p, 'season').after;
+    if (highestBeforeAlltime === null || atElo1 > highestBeforeAlltime) {
       facts.push({
         type: 'highest_skill',
         player_id: p.player_id,
         player_name: playerNameMap.get(p.player_id) ?? '',
         scope: 'all-time',
         notable: true,
-        description: `That match puts ${playerNameMap.get(p.player_id)} on their all-time highest skill (${p.elo_after.toFixed(1)}) (an all-time record)`,
-        metadata: { elo: p.elo_after }
+        description: `That match puts ${playerNameMap.get(p.player_id)} on their all-time highest skill (${atElo1.toFixed(1)}) (an all-time record)`,
+        metadata: { elo: atElo1, ledger: 'alltime' }
       });
-    } else if (highestBeforeSeason === null || p.elo_after > highestBeforeSeason) {
+    } else if (highestBeforeSeason === null || sElo1 > highestBeforeSeason) {
       facts.push({
         type: 'highest_skill',
         player_id: p.player_id,
         player_name: playerNameMap.get(p.player_id) ?? '',
         scope: seasonName,
         notable: true,
-        description: `That match puts ${playerNameMap.get(p.player_id)} on their highest skill (${p.elo_after.toFixed(1)}) (a ${seasonName} record)`,
-        metadata: { elo: p.elo_after }
+        description: `That match puts ${playerNameMap.get(p.player_id)} on their highest skill (${sElo1.toFixed(1)}) (a ${seasonName} record)`,
+        metadata: { elo: sElo1, ledger: 'season' }
       });
     }
 
     // 2. Lowest ever skill — same dual-scope rule
     const lowestBeforeAlltime = getLowestEloBefore(p.player_id, match.game_id, match.season_id, matchId, 'alltime');
     const lowestBeforeSeason = getLowestEloBefore(p.player_id, match.game_id, match.season_id, matchId, 'season');
-    if (lowestBeforeAlltime === null || p.elo_after < lowestBeforeAlltime) {
+    const atElo2 = ledgerElo(p, 'alltime').after;
+    const sElo2 = ledgerElo(p, 'season').after;
+    if (lowestBeforeAlltime === null || atElo2 < lowestBeforeAlltime) {
       facts.push({
         type: 'lowest_skill',
         player_id: p.player_id,
         player_name: playerNameMap.get(p.player_id) ?? '',
         scope: 'all-time',
         notable: true,
-        description: `That match puts ${playerNameMap.get(p.player_id)} on their all-time lowest skill (${p.elo_after.toFixed(1)}) (an all-time record)`,
-        metadata: { elo: p.elo_after }
+        description: `That match puts ${playerNameMap.get(p.player_id)} on their all-time lowest skill (${atElo2.toFixed(1)}) (an all-time record)`,
+        metadata: { elo: atElo2, ledger: 'alltime' }
       });
-    } else if (lowestBeforeSeason === null || p.elo_after < lowestBeforeSeason) {
+    } else if (lowestBeforeSeason === null || sElo2 < lowestBeforeSeason) {
       facts.push({
         type: 'lowest_skill',
         player_id: p.player_id,
         player_name: playerNameMap.get(p.player_id) ?? '',
         scope: seasonName,
         notable: true,
-        description: `That match puts ${playerNameMap.get(p.player_id)} on their lowest skill (${p.elo_after.toFixed(1)}) (a ${seasonName} record)`,
-        metadata: { elo: p.elo_after }
+        description: `That match puts ${playerNameMap.get(p.player_id)} on their lowest skill (${sElo2.toFixed(1)}) (a ${seasonName} record)`,
+        metadata: { elo: sElo2, ledger: 'season' }
       });
     }
 
-    // 3. Most significant match (biggest skill gain/loss) — dual scope
-    const eloChange = Math.abs(p.elo_after - p.elo_before);
+    // 3. Most significant match (biggest skill gain/loss) — each ledger reads its own deltas
+    const eloChangeAlltime = Math.abs(p.alltime_elo_after - p.alltime_elo_before);
+    const eloChangeSeason = Math.abs(p.elo_after - p.elo_before);
     const biggestBeforeAlltime = getBiggestEloChangeBefore(p.player_id, match.game_id, match.season_id, matchId, 'alltime');
     const biggestBeforeSeason = getBiggestEloChangeBefore(p.player_id, match.game_id, match.season_id, matchId, 'season');
-    if (eloChange > biggestBeforeAlltime && biggestBeforeAlltime > 0) {
-      const change = p.elo_after - p.elo_before;
+    if (eloChangeAlltime > biggestBeforeAlltime && biggestBeforeAlltime > 0) {
+      const change = p.alltime_elo_after - p.alltime_elo_before;
       const direction = change > 0 ? 'gain' : 'loss';
       facts.push({
         type: 'biggest_match',
@@ -392,10 +407,10 @@ export function getPunditryForMatch(matchId: number): PunditryFact[] {
         player_name: playerNameMap.get(p.player_id) ?? '',
         scope: 'all-time',
         notable: true,
-        description: `That was ${playerNameMap.get(p.player_id)}'s most significant match of all time (${Math.abs(change).toFixed(1)} skill ${direction}) (an all-time record)`,
-        metadata: { change: eloChange }
+        description: `That was ${playerNameMap.get(p.player_id)}'s most significant match of all time (${eloChangeAlltime.toFixed(1)} skill ${direction}) (an all-time record)`,
+        metadata: { change: eloChangeAlltime, ledger: 'alltime' }
       });
-    } else if (eloChange > biggestBeforeSeason && biggestBeforeSeason > 0) {
+    } else if (eloChangeSeason > biggestBeforeSeason && biggestBeforeSeason > 0) {
       const change = p.elo_after - p.elo_before;
       const direction = change > 0 ? 'gain' : 'loss';
       facts.push({
@@ -404,8 +419,8 @@ export function getPunditryForMatch(matchId: number): PunditryFact[] {
         player_name: playerNameMap.get(p.player_id) ?? '',
         scope: seasonName,
         notable: true,
-        description: `That was ${playerNameMap.get(p.player_id)}'s most significant match this season (${Math.abs(change).toFixed(1)} skill ${direction}) (a ${seasonName} record)`,
-        metadata: { change: eloChange }
+        description: `That was ${playerNameMap.get(p.player_id)}'s most significant match this season (${eloChangeSeason.toFixed(1)} skill ${direction}) (a ${seasonName} record)`,
+        metadata: { change: eloChangeSeason, ledger: 'season' }
       });
     }
 
@@ -558,12 +573,13 @@ export function getPunditryForMatch(matchId: number): PunditryFact[] {
 
           if (!playerParticipant || !opponentParticipant) continue;
 
-          // Head-to-head: Most significant game between players — dual scope
-          const eloChange = Math.abs(playerParticipant.elo_after - playerParticipant.elo_before);
+          // Head-to-head: Most significant game between players — each ledger reads its own deltas
+          const eloChangeAlltime = Math.abs(playerParticipant.alltime_elo_after - playerParticipant.alltime_elo_before);
+          const eloChangeSeason = Math.abs(playerParticipant.elo_after - playerParticipant.elo_before);
           const biggestBeforeAlltime = getBiggestEloChangeBetweenPlayersBefore(playerId, opponentId, match.game_id, match.season_id, matchId, 'alltime');
           const biggestBeforeSeason = getBiggestEloChangeBetweenPlayersBefore(playerId, opponentId, match.game_id, match.season_id, matchId, 'season');
-          if (eloChange > biggestBeforeAlltime && biggestBeforeAlltime > 0 && playerId < opponentId) {
-            const change = playerParticipant.elo_after - playerParticipant.elo_before;
+          if (eloChangeAlltime > biggestBeforeAlltime && biggestBeforeAlltime > 0 && playerId < opponentId) {
+            const change = playerParticipant.alltime_elo_after - playerParticipant.alltime_elo_before;
             const direction = change > 0 ? 'gain' : 'loss';
             facts.push({
               type: 'h2h_biggest_match',
@@ -571,10 +587,10 @@ export function getPunditryForMatch(matchId: number): PunditryFact[] {
               player_name: playerNameMap.get(playerId) ?? '',
               scope: 'all-time',
               notable: true,
-              description: `That was the most significant match ever between ${playerNameMap.get(playerId)} and ${playerNameMap.get(opponentId)} (${Math.abs(change).toFixed(1)} skill ${direction} for ${playerNameMap.get(playerId)}) (an all-time record)`,
-              metadata: { opponent_id: opponentId, opponent_name: playerNameMap.get(opponentId), change: eloChange }
+              description: `That was the most significant match ever between ${playerNameMap.get(playerId)} and ${playerNameMap.get(opponentId)} (${eloChangeAlltime.toFixed(1)} skill ${direction} for ${playerNameMap.get(playerId)}) (an all-time record)`,
+              metadata: { opponent_id: opponentId, opponent_name: playerNameMap.get(opponentId), change: eloChangeAlltime, ledger: 'alltime' }
             });
-          } else if (eloChange > biggestBeforeSeason && biggestBeforeSeason > 0 && playerId < opponentId) {
+          } else if (eloChangeSeason > biggestBeforeSeason && biggestBeforeSeason > 0 && playerId < opponentId) {
             const change = playerParticipant.elo_after - playerParticipant.elo_before;
             const direction = change > 0 ? 'gain' : 'loss';
             facts.push({
@@ -583,8 +599,8 @@ export function getPunditryForMatch(matchId: number): PunditryFact[] {
               player_name: playerNameMap.get(playerId) ?? '',
               scope: seasonName,
               notable: true,
-              description: `That was the most significant match between ${playerNameMap.get(playerId)} and ${playerNameMap.get(opponentId)} this season (${Math.abs(change).toFixed(1)} skill ${direction} for ${playerNameMap.get(playerId)}) (a ${seasonName} record)`,
-              metadata: { opponent_id: opponentId, opponent_name: playerNameMap.get(opponentId), change: eloChange }
+              description: `That was the most significant match between ${playerNameMap.get(playerId)} and ${playerNameMap.get(opponentId)} this season (${eloChangeSeason.toFixed(1)} skill ${direction} for ${playerNameMap.get(playerId)}) (a ${seasonName} record)`,
+              metadata: { opponent_id: opponentId, opponent_name: playerNameMap.get(opponentId), change: eloChangeSeason, ledger: 'season' }
             });
           }
 
