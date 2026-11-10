@@ -49,6 +49,12 @@ export default function SettingsPage() {
     avatar_url?: string | null;
   }
   const [players, setPlayers] = useState<Player[]>([]);
+  // Live Chat score emojis: 'default' + '<gameId>' keys (settings keys
+  // 'chat_emoji' and 'chat_emoji.<gameId>'; empty per-game = use default).
+  const [chatEmojis, setChatEmojis] = useState<Record<string, string>>({
+    default: '',
+  });
+  const [savingChatEmoji, setSavingChatEmoji] = useState<string | null>(null);
   const [editedAvatarUrls, setEditedAvatarUrls] = useState<Record<number, string>>({});
   const [savingAvatar, setSavingAvatar] = useState<number | null>(null);
 
@@ -86,6 +92,14 @@ export default function SettingsPage() {
           if (data.inactive_threshold_days) {
             setInactiveThreshold(data.inactive_threshold_days);
           }
+          // Live Chat score emojis ('chat_emoji' default + per-game overrides)
+          const emojis: Record<string, string> = { default: data.chat_emoji ?? '' };
+          for (const [key, value] of Object.entries(data)) {
+            if (key.startsWith('chat_emoji.') && typeof value === 'string') {
+              emojis[key.slice('chat_emoji.'.length)] = value;
+            }
+          }
+          setChatEmojis(emojis);
         }
       } catch (error) {
         console.error('Failed to load settings:', error);
@@ -187,6 +201,25 @@ export default function SettingsPage() {
       alert('Failed to save inactivity threshold');
     } finally {
       setSavingThreshold(false);
+    }
+  }
+
+  async function saveChatEmoji(key: string) {
+    setSavingChatEmoji(key);
+    try {
+      const value = (chatEmojis[key] ?? '').trim();
+      const settingKey = key === 'default' ? 'chat_emoji' : `chat_emoji.${key}`;
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ settings: { [settingKey]: value } }),
+      });
+      if (!res.ok) throw new Error('Failed to save');
+      setChatEmojis({ ...chatEmojis, [key]: value });
+    } catch (err) {
+      alert('Failed to save live Chat emoji');
+    } finally {
+      setSavingChatEmoji(null);
     }
   }
 
@@ -600,6 +633,70 @@ export default function SettingsPage() {
               ))}
             </div>
           )}
+        </div>
+      </div>
+
+      {/* Live Chat Score Emojis — per-game goal emoji for live Chat updates */}
+      <div className="bg-card rounded-xl shadow-lg overflow-hidden mb-6">
+        <div className="px-6 py-4 bg-gradient-to-r from-emerald-500 to-teal-500">
+          <h2 className="text-lg font-bold text-white flex items-center gap-2">
+            <span className="text-xl">📣</span> Live Match Chat Emojis
+          </h2>
+          <p className="text-white/85 text-sm mt-1">Emoji shown when a side scores in live match Chat updates</p>
+        </div>
+        <div className="p-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="bg-gray-50 rounded-xl p-4 border-2 border-dashed border-gray-200">
+              <div className="flex items-center gap-3 mb-3">
+                <span className="text-xl">{chatEmojis['default'] || '🏆'}</span>
+                <span className="font-semibold text-gray-900">Default emoji</span>
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  maxLength={4}
+                  value={chatEmojis['default'] || ''}
+                  onChange={(e) => setChatEmojis({ ...chatEmojis, default: e.target.value })}
+                  placeholder="🏆 (current default)"
+                  className="w-20 text-center px-2 py-2 border border-gray-300 rounded-lg text-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+                />
+                <button
+                  onClick={() => saveChatEmoji('default')}
+                  disabled={savingChatEmoji === 'default'}
+                  className="px-3 py-2 bg-primary text-white rounded-lg text-sm font-medium hover:bg-primary-hover transition-colors disabled:opacity-50"
+                >
+                  {savingChatEmoji === 'default' ? '...' : 'Save default'}
+                </button>
+              </div>
+            </div>
+            {games.map((game) => (
+              <div key={game.id} className="bg-gray-50 rounded-xl p-4">
+                <div className="flex items-center gap-3 mb-3">
+                  <span className="text-xl">{chatEmojis[String(game.id)] || chatEmojis['default'] || '🏆'}</span>
+                  <span className="font-semibold text-gray-900">{formatGameName(game.name)}</span>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    maxLength={4}
+                    value={chatEmojis[String(game.id)] || ''}
+                    onChange={(e) => setChatEmojis({ ...chatEmojis, [String(game.id)]: e.target.value })}
+                    placeholder="default"
+                    className="w-20 text-center px-2 py-2 border border-gray-300 rounded-lg text-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+                    title="Leave empty to use the default emoji"
+                  />
+                  <button
+                    onClick={() => saveChatEmoji(String(game.id))}
+                    disabled={savingChatEmoji === String(game.id)}
+                    className="px-3 py-2 bg-primary text-white rounded-lg text-sm font-medium hover:bg-primary-hover transition-colors disabled:opacity-50"
+                  >
+                    {savingChatEmoji === String(game.id) ? '...' : 'Save'}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-gray-400 mt-3">Leave a game’s emoji empty to fall back to the default.</p>
         </div>
       </div>
 

@@ -350,9 +350,9 @@ function LiveMatchContent() {
     fetch('/api/live-chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...body, threadKey: chatThreadKey }),
+      body: JSON.stringify({ ...body, threadKey: chatThreadKey, gameId: selectedGameId }),
     }).catch(() => { /* offline — scoring continues */ });
-  }, [chatThreadKey]);
+  }, [chatThreadKey, selectedGameId]);
 
   const beginMatch = useCallback(() => {
     setEvents([]);

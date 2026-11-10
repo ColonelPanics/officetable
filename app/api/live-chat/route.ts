@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import db from '@/lib/db';
 
 // Live-score updates from the live scorer, posted to the same Google Chat
 // space as match results (shared GOOGLE_CHAT_WEBHOOK_URL). Threading: every
@@ -6,29 +7,23 @@ import { NextRequest, NextResponse } from 'next/server';
 // fresh key opens a thread, the same key posts each subsequent point as a
 // reply inside it.
 
-/** Per-sport goal emoji from the game name; 🏆 when unknown. */
-const SPORT_EMOJIS: [RegExp, string][] = [
-  [/table[- .]?tennis|ping[- .]?pong/, '🏓'],
-  [/pool|billiard|snooker/, '🎱'],
-  [/foosball|table[- .]?football/, '⚽'],
-  [/tennis|squash|badminton|racket/, '🎾'],
-  [/darts/, '🎯'],
-  [/hockey/, '🏒'],
-  [/football|soccer/, '⚽'],
-];
-
-function sportEmoji(game?: string | null): string {
-  const n = (game ?? '').toLowerCase();
-  for (const [pattern, emoji] of SPORT_EMOJIS) {
-    if (pattern.test(n)) return emoji;
+/** Goal emoji: per-game setting (chat_emoji.<gameId>) beats the default
+ *  (chat_emoji) — both editable in the settings menu. Falls back to 🏆. */
+function goalEmoji(gameId?: number): string {
+  const rows = db.prepare(`SELECT key, value FROM settings WHERE key LIKE 'chat_emoji%'`).all() as { key: string; value: string }[];
+  const byKey = new Map(rows.map(r => [r.key, r.value]));
+  if (gameId != null) {
+    const own = byKey.get(`chat_emoji.${gameId}`);
+    if (own) return own;
   }
-  return '🏆';
+  return byKey.get('chat_emoji') || '🏆';
 }
 
 interface LiveChatBody {
   action: 'start' | 'goal' | 'final';
   threadKey?: string;
   game?: string | null;
+  gameId?: number;
   targetHint?: string | null;
   redName?: string;
   blueName?: string;
@@ -71,7 +66,7 @@ export async function POST(request: NextRequest) {
       text = `🔴 *LIVE* ${body.game ? body.game : 'Match'}${body.targetHint ? ` (${body.targetHint})` : ''} — *${red}* vs *${blue}*. Kick off!`;
       break;
     case 'goal':
-      text = `${sportEmoji(body.game)} ${body.at ? `${body.at} — ` : ''}*${body.scorer ?? 'A side'}* scores → *${score}*`;
+      text = `${goalEmoji(body.gameId)} ${body.at ? `${body.at} — ` : ''}*${body.scorer ?? 'A side'}* scores → *${score}*`;
       break;
     case 'final':
       text = `🏁 *FULL TIME* ${red} ${score} ${blue}${body.duration ? ` · ${body.duration}` : ''}`;
