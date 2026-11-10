@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { useSelectedGame } from "@/lib/hooks/useSelectedGame";
 import { PlayerAvatar } from "@/components/PlayerAvatar";
@@ -13,6 +13,9 @@ import { useSeasonalEffects } from "@/lib/hooks/useSeasonalEffects";
 import type { GameStats, GameRecords } from "@/lib/data";
 
 interface LeaderboardClientProps {
+  initialGameId: number;
+  /** Scope the SSR data was rendered in, `${game}:${current|alltime|season:<id>}` */
+  initialScopeKey: string;
   initialLeaderboard: LeaderboardEntry[];
   initialStats: GameStats;
   initialRecords: GameRecords;
@@ -218,13 +221,16 @@ function LeaderboardEmptyState({
 }
 
 export default function LeaderboardClient({
+  initialScopeKey,
   initialLeaderboard,
   initialStats,
   initialRecords,
   currentSeasonId,
   seasonalTheme,
 }: LeaderboardClientProps) {
-  const { selectedGameId, selectedGame, games } = useSelectedGame();
+  const { selectedGameId, selectedGame, games, seasonView, currentSeasonId: ctxCurrentSeasonId } = useSelectedGame();
+  // The context loads seasons async — fall back to the server-rendered prop
+  // until it lands, so the first paint already knows the season.
   const { enabled: seasonalEnabled, setEnabled: setSeasonalEnabled } = useSeasonalEffects();
   // null = preference not loaded yet; treat as enabled so the hydration
   // render matches what the server produced
@@ -236,11 +242,14 @@ export default function LeaderboardClient({
   const [gameStats, setGameStats] = useState(initialStats);
   const [gameRecords, setGameRecords] = useState(initialRecords);
   const [loading, setLoading] = useState(false);
+  // Scope of the data on screen: SSR data matches initialScopeKey, so the
+  // mount refetch (same scope) does not flash a skeleton over it.
+  const renderedScopeRef = useRef(initialScopeKey);
   const [showRetired, setShowRetired] = useState(false);
   const [showInactive, setShowInactive] = useState(false);
   const [seasons, setSeasons] = useState<SeasonInfo[]>([]);
-  // 'current' = current season (default); number = a past season; 'alltime'
-  const [seasonView, setSeasonView] = useState<'current' | 'alltime' | number>('current');
+  // Season scope is global (GameContext); the leaderboard renders it, it does
+  // not own it. `seasons` here only feeds the banner + countdown refresh.
   // Ticking clock for the next-season countdown (client-only to avoid hydration issues)
   const [now, setNow] = useState<Date | null>(null);
 
@@ -276,9 +285,10 @@ export default function LeaderboardClient({
       : seasonView !== 'current'
         ? `&season_id=${seasonView}`
         : '';
+    const scopeKey = `${selectedGameId}:${typeof seasonView === 'number' ? `season:${seasonView}` : seasonView}`;
 
     async function fetchData() {
-      setLoading(true);
+      if (scopeKey !== renderedScopeRef.current) setLoading(true);
       try {
         const [leaderboardData, statsData, recordsData] = await Promise.all([
           fetch(`/api/leaderboard?game_id=${selectedGameId}&include_retired=${showRetired}&include_inactive=${showInactive}${scopeParams}`).then(res => res.json()),
@@ -289,6 +299,7 @@ export default function LeaderboardClient({
         if (statsData && !statsData.error) setGameStats(statsData);
         setGameRecords(recordsData);
       } finally {
+        renderedScopeRef.current = scopeKey;
         setLoading(false);
       }
     }
@@ -297,10 +308,11 @@ export default function LeaderboardClient({
   }, [selectedGameId, showRetired, showInactive, seasonView]);
 
   // Resolve the season being viewed + metadata for the banner
+  const resolvedCurrentSeasonId = ctxCurrentSeasonId ?? currentSeasonId;
   const viewedSeasonId = seasonView === 'alltime'
     ? null
     : seasonView === 'current'
-      ? currentSeasonId
+      ? resolvedCurrentSeasonId
       : seasonView;
   const viewedSeason = viewedSeasonId !== null
     ? seasons.find(s => s.id === viewedSeasonId) ?? null
@@ -362,31 +374,6 @@ export default function LeaderboardClient({
               onToggle={() => setSeasonalEnabled(!seasonalOn)}
             />
           )}
-          {/* Season picker + all-time toggle */}
-          <select
-            value={seasonView === 'current' ? `current:${currentSeasonId}` : String(seasonView)}
-            onChange={(e) => {
-              const val = e.target.value;
-              if (val === 'alltime') {
-                setSeasonView('alltime');
-              } else if (val === String(currentSeasonId) || val.startsWith('current:')) {
-                setSeasonView('current');
-              } else {
-                setSeasonView(parseInt(val, 10));
-              }
-            }}
-            className="bg-gray-200 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-300 transition-colors"
-          >
-            <option value={`current:${currentSeasonId}`}>
-              {seasons.find(s => s.id === currentSeasonId)?.name ?? 'Current Season'}
-            </option>
-            {seasons.filter(s => s.id !== currentSeasonId).map(s => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-            <option value="alltime">🏆 All Time</option>
-          </select>
         </div>
         <div className="flex flex-wrap gap-2 sm:gap-3">
           <Link

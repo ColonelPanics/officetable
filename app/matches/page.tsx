@@ -78,7 +78,7 @@ interface PaginationMeta {
 function MatchesPageContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
-  const { selectedGameId } = useSelectedGame();
+  const { selectedGameId, seasonView } = useSelectedGame();
 
   // Get initial values from URL params
   const initialPage = parseInt(searchParams.get('page') || '1', 10);
@@ -112,11 +112,8 @@ function MatchesPageContent() {
   const [hasAchievements, setHasAchievements] = useState(initialHasAchievements);
   const [minSkillChange, setMinSkillChange] = useState(initialMinSkillChange);
   const [showFilters, setShowFilters] = useState(false);
-  // Season scoping: 'current' (default) | 'alltime' | a season id. The Elo
-  // deltas shown per match depend on the ledger in view.
-  const [seasonView, setSeasonView] = useState<'current' | 'alltime' | number>('current');
-  const [seasons, setSeasons] = useState<{ id: number; name: string; start_date: string; end_date: string | null; is_current: boolean }[]>([]);
-  const [currentSeasonId, setCurrentSeasonId] = useState<number | null>(null);
+  // Season scope is global (GameContext); the Elo deltas shown per match
+  // depend on the ledger in view, so scope params ride the API call.
 
   // Build URL params for API call and navigation
   const buildQueryParams = (pageArg?: number, limitArg?: number) => {
@@ -135,9 +132,16 @@ function MatchesPageContent() {
     return params;
   };
 
-  // Update URL without triggering fetch
+  // Update URL without triggering fetch. Global scope params (game/season)
+  // ride along so the page URL stays shareable in the global scheme.
   const updateUrl = (pageArg?: number, limitArg?: number) => {
     const params = buildQueryParams(pageArg, limitArg);
+    // Swap API names for the page's global URL scheme
+    params.delete('game_id');
+    params.delete('season_id');
+    if (selectedGameId) params.set('game', selectedGameId.toString());
+    if (seasonView === 'alltime') params.set('scope', 'alltime');
+    else if (typeof seasonView === 'number') params.set('season', String(seasonView));
     router.push(`/matches?${params.toString()}`, { scroll: false });
   };
 
@@ -145,13 +149,12 @@ function MatchesPageContent() {
     fetch("/api/players")
       .then((res) => res.json())
       .then((data: Player[]) => setPlayers(data));
-    fetch("/api/seasons")
-      .then((res) => res.json())
-      .then((data) => {
-        setSeasons(data.seasons || []);
-        setCurrentSeasonId(data.current_season_id ?? null);
-      });
   }, []);
+
+  // A global scope change is a new query
+  useEffect(() => {
+    setPage(1);
+  }, [seasonView]);
 
   useEffect(() => {
     if (selectedGameId) {
@@ -166,11 +169,6 @@ function MatchesPageContent() {
         });
     }
   }, [selectedGameId, page, limit, dateFrom, dateTo, JSON.stringify(selectedPlayerIds), playerCount, hasAchievements, minSkillChange, seasonView]);
-
-  const selectSeasonView = (view: 'current' | 'alltime' | number) => {
-    setSeasonView(view);
-    setPage(1);
-  };
 
   const formatDate = (dateStr: string) => {
     const date = new Date(dateStr);
@@ -355,29 +353,7 @@ function MatchesPageContent() {
       <div className="flex flex-wrap items-center justify-between gap-3 mb-8">
         <h1 className="text-3xl font-bold">Match History</h1>
         <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-          {/* Season scope: Elo swings per match are ledger-specific */}
-          <select
-            value={seasonView === 'current' ? `current:${currentSeasonId}` : String(seasonView)}
-            onChange={(e) => {
-              const val = e.target.value;
-              if (val === 'alltime') selectSeasonView('alltime');
-              else if (val.startsWith('current:') || val === String(currentSeasonId)) selectSeasonView('current');
-              else selectSeasonView(parseInt(val, 10));
-            }}
-            className="bg-card border border-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-50 transition-colors font-medium"
-          >
-            {currentSeasonId === null ? (
-              <option value="current:0">Loading seasons…</option>
-            ) : (
-              <option value={`current:${currentSeasonId}`}>
-                {seasons.find(s => s.id === currentSeasonId)?.name ?? 'Current Season'}
-              </option>
-            )}
-            {seasons.filter(s => s.id !== currentSeasonId).map(s => (
-              <option key={s.id} value={s.id}>{s.name}</option>
-            ))}
-            <option value="alltime">🏆 All Time</option>
-          </select>
+          {/* Season scope lives in the top-bar context bar now */}
           <Link
           href={selectedGameId ? `/matches/new?game=${selectedGameId}` : "/matches/new"}
           className="bg-primary text-white text-sm px-4 py-2 rounded-lg hover:bg-primary-hover transition-all shadow-sm hover:shadow-md font-medium"

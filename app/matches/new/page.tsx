@@ -28,7 +28,7 @@ interface PlayerRating {
 function NewMatchContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { selectedGameId, games, setSelectedGameId } = useSelectedGame();
+  const { selectedGameId, games, setSelectedGameId, setSeasonView } = useSelectedGame();
   const selectedGameData = games.find(g => g.id === selectedGameId);
   const [players, setPlayers] = useState<Player[]>([]);
   const [ratings, setRatings] = useState<PlayerRating[]>([]);
@@ -133,6 +133,9 @@ function NewMatchContent() {
         throw new Error(data.error || "Failed to record match");
       }
 
+      // A just-recorded match is a current-season fact — drop any inherited
+      // all-time / past-season scope so the scoreboard shows the new game.
+      setSeasonView('current');
       router.push("/");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to record match");

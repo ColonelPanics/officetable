@@ -5,9 +5,9 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { PlayerHeader } from "./components/PlayerHeader";
 import { CareerHighlights } from "./components/CareerHighlights";
-import { GameTabBar } from "./components/GameTabBar";
 import { GameSection } from "./components/GameSection";
 import { GamblingSection } from "./components/GamblingSection";
+import { useSelectedGame } from "@/lib/hooks/useSelectedGame";
 
 interface EloHistoryPoint {
   elo: number;
@@ -157,11 +157,11 @@ export default function PlayerProfilePage() {
   const [stats, setStats] = useState<PlayerStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
-  // season view: 'current' (default) | 'alltime' | a specific season id
-  const [seasonView, setSeasonView] = useState<'current' | 'alltime' | number>('current');
-  const [seasons, setSeasons] = useState<{ id: number; name: string; start_date: string; end_date: string | null; is_current: boolean }[]>([]);
-  const [currentSeasonId, setCurrentSeasonId] = useState<number | null>(null);
+  // Game + season scope are global (GameContext): the profile shows the
+  // leaderboard-selected game in the app-wide season view. No page-local
+  // scope controls (GameTabBar / season select were removed with the C5/Q5a
+  // shaping decisions).
+  const { selectedGameId, seasonView } = useSelectedGame();
 
   // Scope params for stats/head-to-head fetches
   const scopeParams = seasonView === 'alltime'
@@ -172,16 +172,6 @@ export default function PlayerProfilePage() {
   const [headToHeadData, setHeadToHeadData] = useState<Map<number, HeadToHeadOpponent[]>>(new Map());
   const [headToHeadLoading, setHeadToHeadLoading] = useState<Set<number>>(new Set());
   const [expandedGames, setExpandedGames] = useState<Set<number>>(new Set());
-
-  useEffect(() => {
-    fetch('/api/seasons')
-      .then((res) => res.json())
-      .then((data) => {
-        setSeasons(data.seasons || []);
-        setCurrentSeasonId(data.current_season_id ?? null);
-      })
-      .catch((err) => console.error('Failed to load seasons:', err));
-  }, []);
 
   useEffect(() => {
     fetch(`/api/player-stats?player_id=${playerId}${scopeParams}`)
@@ -317,59 +307,12 @@ export default function PlayerProfilePage() {
         }}
       />
 
-      {/* Season scope picker: current season, any past season, or all time */}
-      <div className="mb-6 flex items-center gap-3">
-        <select
-          value={seasonView === 'alltime' ? 'alltime' : seasonView === 'current' ? `current:${currentSeasonId}` : String(seasonView)}
-          onChange={(e) => {
-            const val = e.target.value;
-            setHeadToHeadData(new Map());
-            setHeadToHeadLoading(new Set());
-            if (val === 'alltime') {
-              setSeasonView('alltime');
-            } else if (val.startsWith('current:') || val === String(currentSeasonId)) {
-              setSeasonView('current');
-            } else {
-              setSeasonView(parseInt(val, 10));
-            }
-          }}
-          className="bg-gray-200 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-300 transition-colors text-sm font-medium"
-        >
-          <option value={`current:${currentSeasonId}`}>
-            {seasons.find(s => s.id === currentSeasonId)?.name ?? 'Current Season'}
-          </option>
-          {seasons.filter(s => s.id !== currentSeasonId).map(s => (
-            <option key={s.id} value={s.id}>{s.name}</option>
-          ))}
-          <option value="alltime">🏆 All Time</option>
-        </select>
-        {seasonView !== 'alltime' && (
-          <span className="text-xs text-gray-400">
-            {seasonView === 'current' ? 'season skill resets to 0 at each season start' : 'viewing a past season'}
-          </span>
-        )}
-      </div>
-
       {/* Career Highlights */}
       <CareerHighlights
         gameStats={stats.gameStats}
         totalAchievementsUnlocked={achievementUnlocked}
         totalAchievementsPossible={achievementTotal}
       />
-
-      {/* Game Tab Navigation */}
-      {stats.gameStats.length > 0 && (
-        <GameTabBar
-          games={stats.gameStats.map(g => ({
-            id: g.game_id,
-            name: g.game_name,
-            image_url: g.image_url || null,
-            elo: g.elo,
-          }))}
-          selectedGameId={selectedGameId}
-          onSelect={setSelectedGameId}
-        />
-      )}
 
       {/* Game Content */}
       {stats.gameStats.length === 0 ? (
