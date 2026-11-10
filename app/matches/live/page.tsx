@@ -335,7 +335,7 @@ function LiveMatchContent() {
 
   const targetHint = selectedGameData
     ? selectedGameData.score_type === 'best_of'
-      ? `Best of ${selectedGameData.score_value} games`
+      ? `Best of ${selectedGameData.score_value} points`
       : `First to ${selectedGameData.score_value} points`
     : null;
 

@@ -222,7 +222,7 @@ function NewMatchContent() {
         {selectedGameData && (
           <p className="text-gray-500">
             {selectedGameData.score_type === 'best_of'
-              ? `Best of ${selectedGameData.score_value} games`
+              ? `Best of ${selectedGameData.score_value} points`
               : `First to ${selectedGameData.score_value} points`}
           </p>
         )}
