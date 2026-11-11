@@ -420,6 +420,10 @@ export async function POST(request: NextRequest) {
     const allTimeRecords = notablePunditry
       .filter(p => p.scope === 'all-time' && ALLTIME_RECORD_TYPES.has(p.type))
       .map(p => ({ description: p.description }));
+    // All-time records are promoted to their own 🏆 section, so the punditry
+    // block carries the remaining notable lines only (no duplication)
+    const notableNonRecordPunditry = notablePunditry
+      .filter(p => !(p.scope === 'all-time' && ALLTIME_RECORD_TYPES.has(p.type)));
     const seasonLabel = getSeason(result.seasonId)?.name ?? null;
 
     // Send notification (async, don't wait for it)
@@ -439,7 +443,7 @@ export async function POST(request: NextRequest) {
           achievementIcon: a.achievement_icon,
           payout: a.payout
         })),
-        notablePunditry.map(p => ({ description: p.description, scope: p.scope, notable: true })),
+        notableNonRecordPunditry.map(p => ({ description: p.description, scope: p.scope, notable: true })),
         playerAvatarMap,
         seasonLabel,
         allTimeRecords
