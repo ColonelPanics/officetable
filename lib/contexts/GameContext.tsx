@@ -36,7 +36,7 @@ const STORAGE_KEY = 'selectedGameId';
  * machine) carry only the game stamp — season scope is meaningless there
  * (spec L2 region boundary: context bar present but inert).
  */
-function isScopedSeasonPath(pathname: string): boolean {
+export function isScopedSeasonPath(pathname: string): boolean {
   if (pathname === '/') return true;
   if (pathname === '/matches') return true;
   if (pathname.startsWith('/players/')) return true;

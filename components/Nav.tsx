@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useGames } from '../lib/contexts/GameContext';
+import { isScopedSeasonPath } from '../lib/contexts/GameContext';
 import { useTheme, type ColorMode } from '../lib/contexts/ThemeContext';
 import { LiveChip } from './LiveChip';
 
@@ -39,6 +40,8 @@ export function Nav() {
   const router = useRouter();
   // Casino is not a game — exactly one of {game, casino} is highlighted at a time.
   const onCasino = pathname?.startsWith('/gambling') ?? false;
+  // Pages where season scope actually changes the data on screen
+  const seasonScopedHere = pathname !== null && isScopedSeasonPath(pathname);
 
   useEffect(() => { setMounted(true); }, []);
 
@@ -222,10 +225,18 @@ export function Nav() {
             </div>
 
             <div className="relative">
+              {/* On pages where season scope is inert (match detail, casino,
+                  live, record form, players list, time machine, settings) the
+                  control dims and explains: the picked scope still follows you
+                  to the next scoped page (leaderboard/profile/match history) */}
               <button
                 onClick={() => { setShowSeasonMenu(!showSeasonMenu); setShowGameMenu(false); }}
-                className="flex items-center gap-1.5 px-2 sm:px-3 py-2 bg-gray-100 text-gray-800 rounded-lg hover:bg-gray-200 transition-colors"
-                title="Scope: season (current / past / all-time)"
+                className={`flex items-center gap-1.5 px-2 sm:px-3 py-2 bg-gray-100 text-gray-800 rounded-lg hover:bg-gray-200 transition-colors ${
+                  seasonScopedHere ? '' : 'opacity-50'
+                }`}
+                title={seasonScopedHere
+                  ? 'Scope: season (current / past / all-time)'
+                  : `Season scope has no effect on this page — picked scope applies on the leaderboard, player profiles and match history. Current pick: ${seasonLabel}`}
               >
                 <span className="hidden sm:inline">🗓️</span>
                 <span className="text-sm font-medium max-w-36 truncate">
